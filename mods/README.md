@@ -1,37 +1,63 @@
-# Как писать моды для ArkModLoader
+# Как писать моды для ArkModLoader (API v2)
 
-Мод — это `.so` под **arm64-v8a**, которая экспортирует две функции:
+Мод — это `.so` под **arm64-v8a**, которая экспортирует:
 
 ```cpp
 #include <arkmod.h>   // loader/include/arkmod.h
 
-extern "C" __attribute__((visibility("default"))) const char* ArkMod_Name() { return "Мой мод"; }
+extern "C" __attribute__((visibility("default"))) const char* ArkMod_Name() { return "My Mod"; }
 
 extern "C" __attribute__((visibility("default"))) int ArkMod_Init(const ArkModAPI* api) {
-    api->hook_function("Actor.ReceiveBeginPlay", MyPre, nullptr, nullptr);
-    api->on_tick(MyTick, nullptr);
-    return 0;  // 0 = успех
+    if (api->version < 2) return 1;
+    api->ui_toggle("MY CHEAT", &gEnabled);          // строка ON/OFF в меню MODS
+    api->on_tick(MyTick, nullptr);                  // каждый кадр
+    return 0;                                       // 0 = успех
 }
+
+// Необязательно: вернуть всё как было перед выгрузкой/перезагрузкой мода.
+extern "C" __attribute__((visibility("default"))) void ArkMod_Shutdown() { ... }
 ```
 
 ## Куда класть
-`/sdcard/Android/data/com.studiowildcard.wardrumstudios.ark/files/ArkMods/`.
-Загрузчик подхватывает все `*.so` из этой папки в алфавитном порядке при запуске игры.
-Лог загрузчика и модов лежит там же: `loader.log`.
+`/sdcard/Android/data/com.studiowildcard.wardrumstudios.ark/files/ArkMods/`
+
+| Файл | Что это |
+|---|---|
+| `libmy_mod.so` | сам мод |
+| `my_mod.ini` | настройки мода, создаётся автоматически |
+| `mods.ini` | какие моды включены (`1`/`0`) |
+| `loader.log` | лог загрузчика и модов |
+
+## Что происходит «на ходу» (без перезапуска игры)
+- **Новый `.so`** в папке загружается через несколько секунд.
+- **Изменённый `.so`**: мод выгружается (вызывается `ArkMod_Shutdown`) и загружается новая версия.
+- **Удалённый `.so`** выгружается.
+- **Правка `my_mod.ini`** подхватывается в течение секунды.
+- **Меню MODS** в игре: строка с названием мода включает или выключает его, под ней идут переключатели самого мода.
+
+При выгрузке загрузчик сам удаляет всё, что мод зарегистрировал через API: хуки функций, тики, задачи, отрисовку, касания и переключатели.
+**Исключение:** мод, который вызвал `inline_hook`, на ходу не выгружается. Изменения для него применятся после перезапуска игры, а в меню будет пометка.
+
+## Настройки
+```cpp
+float speed = api->config_float("fly_speed", 1200.f);   // в файле появится "fly_speed = 1200"
+const char* s = api->config_string("text", "hello");     // указатель живёт до следующего чтения: копируй
+```
+Если ключа нет в файле, он дописывается со значением по умолчанию. Так пользователь видит, что можно настроить.
+
+## Интерфейс
+- `ui_toggle(label, &int)`: переключатель в меню MODS. Мод сам читает значение в тике.
+- `on_draw(fn, user)`: рисовать поверх HUD каждый кадр через `draw_rect` и `draw_text` (только ASCII, координаты в пикселях экрана).
+- `on_touch(fn, user)`: касания. Верни `1` на `phase == 0` (нажатие), и это касание (движение и отпускание) достанется тебе, а не игре.
 
 ## Правила
-- В `ArkMod_Init` к объектам игры **не прикасайся**: только регистрируй хуки и тики
-  (или вызови `run_on_game_thread`).
-- Хуки и тики выполняются в игровом потоке, там можно вызывать функции движка.
-- Пути функций пишутся так же, как в логе: `/Script/Engine.Actor.ReceiveBeginPlay`.
-  Без `/` в начале путь работает как суффикс: `MainMenuUI_C.Construct`.
+- `ArkMod_Init`, `ArkMod_Shutdown`, хуки, тики, отрисовка и касания выполняются в игровом потоке, там можно вызывать функции движка.
+- Пути функций пишутся так же, как в логе: `/Script/Engine.Actor.ReceiveBeginPlay`. Без `/` в начале путь работает как суффикс: `MainMenuUI_C.Construct`.
 - Pre-хук, который вернул `0`, отменяет вызов оригинальной функции.
-- Параметры функции лежат в `ctx->params`, смещение поля: `api->property_offset(ctx->func, "ИмяПараметра")`.
-- Вызвать функцию игры можно через `find_function`, `params_size` и `process_event`.
-  Пример — `hello_menu/hello_menu.cpp`.
+- Примеры: `hello_menu` (настройки и восстановление при выгрузке), `cheat_menu` (переключатели, отрисовка, касания).
 
 ## Сборка
 Добавь имя мода в `foreach(mod ...)` в `loader/CMakeLists.txt` и выполни `cmake --build loader/build`.
-Готовая `.so` появится в `loader/build/mods/`, а `tools/deploy.sh` сам скопирует её в игру.
+Готовая `.so` появится в `loader/build/mods/`, а `tools/deploy.sh` скопирует её в игру. Чтобы обновить один мод без перезапуска игры, достаточно `adb push` нового файла в папку `ArkMods`.
 
 Моды рассчитаны на одиночную игру и неофициальные серверы.

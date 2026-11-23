@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(arkmodloader SHARED
-    src/main.cpp src/hook.cpp src/engine.cpp src/dispatch.cpp src/mods.cpp src/log.cpp)
+    src/main.cpp src/hook.cpp src/engine.cpp src/dispatch.cpp src/mods.cpp src/log.cpp src/ui.cpp)
 target_include_directories(arkmodloader PRIVATE include src)
 target_compile_options(arkmodloader PRIVATE -fvisibility=hidden -O2 -Wall)
 target_link_libraries(arkmodloader PRIVATE log dl)

@@ -76,3 +76,21 @@
 - `inline_hook` only handles prologues without PC-relative instructions (no relocation yet).
 - `make_text` leaks one FText ref per call (negligible).
 - No mod unload/reload.
+
+## v0.4.0 (2026-11-23) — settings, live reload, in-game mod list, git
+- API v2 (appended, v1 mods still work): config_string/int/float (ArkMods/<id>.ini, missing keys
+  auto-appended, re-read on change), ui_toggle, on_draw + draw_rect/draw_text, on_touch; optional
+  `ArkMod_Shutdown`.
+- MODS panel moved into the loader (`ui.cpp`: AShooterHUD::DrawHUD + Slate touch hooks); lists mods
+  with ON/OFF (persisted in ArkMods/mods.ini) and each mod's toggles.
+- Live reload (`mods.cpp`): scan every 3 s; new → load, changed → Shutdown + unload + load fresh copy,
+  removed → unload. Unload drops everything the mod registered (owner = module base via dladdr of the
+  callback / return address). No dlclose (code may still be on a stack); mods that used inline_hook
+  can't be unloaded live → "restart the game to apply".
+- Bug found in testing: re-adding a deleted mod reused cache name `<id>.1.so` while the old copy was
+  still mapped → overwrote live code → SIGSEGV. Fixed: process-wide copy counter + cache wiped at start.
+- cheat_menu and hello_menu ported to v2 (no own inline hooks → fully hot-reloadable).
+- Verified on MuMu (main menu): load, config edit live, reload, delete/unload, re-add ×2, no crash.
+  In-game panel not yet verified by the user.
+- Git: repo initialised; `main` = 0.2.0 baseline, work on branch `v0.4`. Game binaries / re dumps ignored.
+- Attempted relocating hook engine (v0.3.0) was abandoned (see conversation); hook.cpp is the 0.2.0 one.

@@ -64,6 +64,7 @@ bool Ready() {
 
 FUObjectArray* Objects() { return gObjects; }
 UObject* World() { return gWorld ? *gWorld : nullptr; }
+bool IsMainMenu() { UObject* w = World(); return !w || Name(w) == "MainMenu"; }
 uint32_t GameThreadId() { return gGameThreadId ? *gGameThreadId : 0; }
 uint64_t FrameCounter() { return gFrameCounter ? *gFrameCounter : 0; }
 

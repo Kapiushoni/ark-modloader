@@ -17,6 +17,7 @@ void* Sym(const char* name);
 
 FUObjectArray* Objects();
 UObject* World();
+bool IsMainMenu();
 uint32_t GameThreadId();
 uint64_t FrameCounter();
 

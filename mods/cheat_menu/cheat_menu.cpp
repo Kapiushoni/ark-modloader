@@ -1,12 +1,13 @@
-// Cheat Menu (single-player): a "MODS" button on the HUD opens a panel with toggles
-// (Fly, God mode, Infinite stats, Speed x3). While flying, big UP / DOWN buttons appear:
-//   short tap  -> keep rising / descending until tapped again (or the other button is tapped)
+// Cheat Menu (single-player), API v2: toggles live in the loader's MODS panel
+// (Fly, God mode, Infinite stats, Speed). While flying, big UP / DOWN buttons appear:
+//   short tap  -> keep rising / descending until tapped again (or the other button)
 //   long press -> move only while held
+// Settings (ArkMods/cheat_menu.ini): fly_speed, vertical_speed, speed_multiplier.
+// No inline hooks, so the mod can be switched off / hot-reloaded at any time.
 #include <arkmod.h>
 
 #include <time.h>
 
-#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 
@@ -27,83 +28,31 @@ double Now() {
 UObject* gPCClass;
 int gPlayerOff = -1, oPawnRef = -1;
 UObject *gPC, *gPawn, *gMove, *gStatus;
+UObject* gSetMoveMode;
+int oMoveMode = -1, oMoveCustom = -1;
+int oVelocity = -1, oMaxFly = -1, oMaxWalk = -1, oCurStats = -1, oMaxStats = -1, oMovementMode = -1;
 int gFrame = 0;
 
-struct Fn {
-    UObject* f = nullptr;
-    int size = 0;
-};
-Fn gDrawRect, gDrawText, gSetMoveMode;
-int oRectColor, oRectX, oRectY, oRectW, oRectH;
-int oTxt, oTxtColor, oTxtX, oTxtY, oTxtFont, oTxtScale, oTxtScalePos;
-int oMoveMode, oMoveCustom;
-int oVelocity = -1, oMaxFly = -1, oMaxWalk = -1, oCurStats = -1, oMaxStats = -1, oMovementMode = -1;
-
-Fn Lookup(const char* cls, const char* fn) {
-    Fn r;
-    UObject* c = api->find_object(cls);
-    r.f = c ? api->find_function(c, fn) : nullptr;
-    r.size = r.f ? api->params_size(r.f) : 0;
-    if (!r.f) api->log("cheat_menu: missing %s.%s", cls, fn);
-    return r;
-}
-int Off(Fn& fn, const char* p) {
-    int o = fn.f ? api->property_offset(fn.f, p) : -1;
-    if (o < 0) api->log("cheat_menu: missing param %s", p);
-    return o;
-}
-
 // ------------------------------------------------------------------ state
-enum Toggle { kFly, kGod, kStats, kSpeed, kCount };
-const char* kLabels[kCount] = {"FLY", "GOD MODE", "INFINITE STATS", "SPEED x3"};
-bool gOn[kCount] = {};
-bool gMenuOpen = false;
+int gFly, gGod, gStats, gSpeed;          // toggles (driven by the MODS panel)
+int gFlyApplied, gSpeedApplied;          // what is currently applied to the pawn
 float gOrigWalk = 0;
-
-int gVertical = 0;  // flight: +1 rising, -1 descending, 0 hover
-constexpr float kFlySpeed = 1200.f, kVerticalSpeed = 900.f;
-constexpr double kHoldThreshold = 0.35;  // longer press = "move while held"
+int gVertical = 0;                       // +1 rising, -1 descending, 0 hover
+float gFlySpeed = 1200, gVerticalSpeed = 900, gSpeedMul = 3;
 
 struct Rect {
-    float x, y, w, h;
-    bool Hit(float px, float py) const { return px >= x && px <= x + w && py >= y && py <= y + h; }
+    float x = 0, y = 0, w = 0, h = 0;
+    bool Hit(float px, float py) const { return w > 0 && px >= x && px <= x + w && py >= y && py <= y + h; }
 };
-Rect gModsBtn, gRows[kCount], gUpBtn, gDownBtn;
-float gScreenW = 0, gScreenH = 0;
-bool gWorldIsMenu = true;
+Rect gUpBtn, gDownBtn;
 
 // ------------------------------------------------------------------ helpers
-void DrawRect(UObject* hud, const Rect& r, float cr, float cg, float cb, float ca) {
-    char p[64] = {};
-    float* c = reinterpret_cast<float*>(p + oRectColor);
-    c[0] = cr; c[1] = cg; c[2] = cb; c[3] = ca;
-    F<float>(p, oRectX) = r.x; F<float>(p, oRectY) = r.y; F<float>(p, oRectW) = r.w; F<float>(p, oRectH) = r.h;
-    api->process_event(hud, gDrawRect.f, p);
-}
-
-void DrawText(UObject* hud, const char* s, float x, float y, float scale, float cr = 1, float cg = 1, float cb = 1) {
-    wchar_t w[64];
-    int n = 0;
-    for (; s[n] && n < 63; ++n) w[n] = wchar_t(static_cast<unsigned char>(s[n]));
-    w[n] = 0;
-    char p[96] = {};
-    struct { wchar_t* data; int32_t num, max; } str{w, n + 1, n + 1};
-    std::memcpy(p + oTxt, &str, sizeof str);
-    float* c = reinterpret_cast<float*>(p + oTxtColor);
-    c[0] = cr; c[1] = cg; c[2] = cb; c[3] = 1;
-    F<float>(p, oTxtX) = x; F<float>(p, oTxtY) = y;
-    F<void*>(p, oTxtFont) = nullptr;  // engine medium font
-    F<float>(p, oTxtScale) = scale;
-    F<bool>(p, oTxtScalePos) = false;
-    api->process_event(hud, gDrawText.f, p);
-}
-
 void SetMoveMode(uint8_t mode) {
-    if (!gMove) return;
+    if (!gMove || !gSetMoveMode) return;
     char p[16] = {};
     p[oMoveMode] = char(mode);
     p[oMoveCustom] = 0;
-    api->process_event(gMove, gSetMoveMode.f, p);
+    api->process_event(gMove, gSetMoveMode, p);
 }
 
 int FindPC(UObject* o, void* out) {
@@ -118,6 +67,7 @@ void Refresh() {  // (re)resolve player objects; pawn changes on respawn / mount
     if (pawn == gPawn) return;
     gPawn = pawn;
     gMove = gStatus = nullptr;
+    gFlyApplied = gSpeedApplied = 0;  // new pawn: re-apply
     if (!gPawn) return;
     int mo = api->property_offset(gPawn, "CharacterMovement");
     gMove = mo >= 0 ? F<UObject*>(gPawn, mo) : nullptr;
@@ -136,168 +86,90 @@ void Refresh() {  // (re)resolve player objects; pawn changes on respawn / mount
         oCurStats = api->property_offset(gStatus, "CurrentStatusValues");
         oMaxStats = api->property_offset(gStatus, "MaxStatusValues");
     }
-    char cls[128] = "?";
-    api->object_name(api->object_class(gPawn), cls, sizeof cls);
-    api->log("cheat_menu: pawn=%s move=%p status=%p", cls, gMove, gStatus);
 }
 
-void SetToggle(int i, bool on) {
-    gOn[i] = on;
-    api->log("cheat_menu: %s %s", kLabels[i], on ? "ON" : "OFF");
-    if (i == kFly) {
+void ReadConfig() {
+    gFlySpeed = api->config_float("fly_speed", 1200.f);
+    gVerticalSpeed = api->config_float("vertical_speed", 900.f);
+    gSpeedMul = api->config_float("speed_multiplier", 3.f);
+}
+
+// Bring the pawn in line with the toggles (edges only, plus per-frame upkeep).
+void Apply() {
+    if (gFly != gFlyApplied && gMove) {
+        gFlyApplied = gFly;
         gVertical = 0;
-        SetMoveMode(on ? 5 /*MOVE_Flying*/ : 3 /*MOVE_Falling*/);
+        SetMoveMode(gFly ? 5 /*MOVE_Flying*/ : 3 /*MOVE_Falling*/);
     }
-    if (i == kSpeed && gMove && oMaxWalk >= 0) {
-        if (on) gOrigWalk = F<float>(gMove, oMaxWalk);
+    if (gSpeed != gSpeedApplied && gMove && oMaxWalk >= 0) {
+        gSpeedApplied = gSpeed;
+        if (gSpeed) gOrigWalk = F<float>(gMove, oMaxWalk);
         else if (gOrigWalk > 0) F<float>(gMove, oMaxWalk) = gOrigWalk;
     }
-}
 
-// ------------------------------------------------------------------ per-frame
-void ApplyCheats() {
-    if (gOn[kFly] && gMove) {
+    if (gFly && gMove) {
         if (oMovementMode >= 0 && F<uint8_t>(gMove, oMovementMode) != 5) SetMoveMode(5);
-        if (oMaxFly >= 0) F<float>(gMove, oMaxFly) = kFlySpeed;
+        if (oMaxFly >= 0) F<float>(gMove, oMaxFly) = gFlySpeed;
         if (oVelocity >= 0) {
             float* v = reinterpret_cast<float*>(reinterpret_cast<char*>(gMove) + oVelocity);
-            if (gVertical) v[2] = kVerticalSpeed * gVertical;
+            if (gVertical) v[2] = gVerticalSpeed * gVertical;
             else if (v[2] > -50.f && v[2] < 50.f) v[2] = 0.f;  // hover: kill leftover drift
         }
+    } else {
+        gVertical = 0;
     }
     if (gStatus && oCurStats >= 0 && oMaxStats >= 0) {
         float* cur = reinterpret_cast<float*>(reinterpret_cast<char*>(gStatus) + oCurStats);
         float* max = reinterpret_cast<float*>(reinterpret_cast<char*>(gStatus) + oMaxStats);
-        if (gOn[kGod]) { cur[0] = max[0]; cur[2] = 0; }                // health, torpidity
-        if (gOn[kStats]) for (int i : {1, 3, 4, 5}) cur[i] = max[i];  // stamina, oxygen, food, water
+        if (gGod) { cur[0] = max[0]; cur[2] = 0; }                // health, torpidity
+        if (gStats) for (int i : {1, 3, 4, 5}) cur[i] = max[i];  // stamina, oxygen, food, water
     }
-    if (gOn[kSpeed] && gMove && oMaxWalk >= 0 && gOrigWalk > 0) F<float>(gMove, oMaxWalk) = gOrigWalk * 3.f;
+    if (gSpeed && gMove && oMaxWalk >= 0 && gOrigWalk > 0) F<float>(gMove, oMaxWalk) = gOrigWalk * gSpeedMul;
 }
 
 void Tick(void*) {
     ++gFrame;
     char world[64];
     api->object_name(api->get_world(), world, sizeof world);
-    gWorldIsMenu = !strcmp(world, "MainMenu");
-    if (gWorldIsMenu) { gPawn = nullptr; return; }
-    if (gFrame % 30 == 0 || !gPC) Refresh();
-    ApplyCheats();
+    if (!strcmp(world, "MainMenu")) { gPawn = nullptr; return; }
+    if (gFrame % 30 == 0 || !gPC) { Refresh(); ReadConfig(); }
+    Apply();
 }
 
-// ------------------------------------------------------------------ touch input
-// ARK's mobile UI swallows touches before PlayerInput, so we intercept them at the Slate
-// level (FSlateApplication::OnTouch*). Touches that start on our UI are consumed.
-struct Vec2 { float x, y; };
-constexpr int kMaxTouch = 16;
-struct TouchInfo {
-    bool ours = false;
-    int dir = 0;              // +1 UP button, -1 DOWN button, 0 other
-    double start = 0;
-    bool stoppedOnPress = false;  // the press turned movement off -> release does nothing
-};
-TouchInfo gTouch[kMaxTouch];
-
-bool (*gOrigTouchStarted)(void*, const void*, const Vec2&, int, int);
-bool (*gOrigTouchMoved)(void*, const Vec2&, int, int);
-bool (*gOrigTouchEnded)(void*, const Vec2&, int, int);
-
-bool OnOurUi(const Vec2& p, TouchInfo& t) {
-    t = TouchInfo{};
-    if (gScreenW == 0 || gWorldIsMenu) return false;
-    if (gOn[kFly]) {
-        int dir = gUpBtn.Hit(p.x, p.y) ? 1 : gDownBtn.Hit(p.x, p.y) ? -1 : 0;
-        if (dir) {
-            t.dir = dir;
-            t.start = Now();
-            t.stoppedOnPress = gVertical == dir;  // tapping the active direction stops
-            gVertical = t.stoppedOnPress ? 0 : dir;
-            return t.ours = true;
-        }
-    }
-    if (gModsBtn.Hit(p.x, p.y)) { gMenuOpen = !gMenuOpen; return t.ours = true; }
-    if (!gMenuOpen) return false;
-    for (int i = 0; i < kCount; ++i)
-        if (gRows[i].Hit(p.x, p.y)) { SetToggle(i, !gOn[i]); return t.ours = true; }
-    return false;
-}
-
-bool HookedTouchStarted(void* app, const void* win, const Vec2& loc, int idx, int ctrl) {
-    TouchInfo scratch;
-    TouchInfo& t = idx >= 0 && idx < kMaxTouch ? gTouch[idx] : scratch;
-    if (OnOurUi(loc, t)) return true;
-    return gOrigTouchStarted(app, win, loc, idx, ctrl);
-}
-bool HookedTouchMoved(void* app, const Vec2& loc, int idx, int ctrl) {
-    if (idx >= 0 && idx < kMaxTouch && gTouch[idx].ours) return true;
-    return gOrigTouchMoved(app, loc, idx, ctrl);
-}
-bool HookedTouchEnded(void* app, const Vec2& loc, int idx, int ctrl) {
-    if (idx < 0 || idx >= kMaxTouch || !gTouch[idx].ours) return gOrigTouchEnded(app, loc, idx, ctrl);
-    TouchInfo& t = gTouch[idx];
-    // Long press = "move while held": stop on release. Short tap keeps moving.
-    if (t.dir && !t.stoppedOnPress && Now() - t.start > kHoldThreshold && gVertical == t.dir) gVertical = 0;
-    t = TouchInfo{};
-    return true;
-}
-
-// ------------------------------------------------------------------ drawing (after native AShooterHUD::DrawHUD)
-// ARK's HUD draws natively and never fires HUD.ReceiveDrawHUD, so we inline-hook DrawHUD itself.
-void (*gOrigDrawHUD)(UObject*) = nullptr;
-int oCanvas = -1, oSizeX = -1, oSizeY = -1;
-bool gLoggedHud = false;
-
-void DrawFlightButton(UObject* hud, const Rect& r, const char* label, bool active, float s) {
-    DrawRect(hud, r, active ? 0.1f : 0.05f, active ? 0.55f : 0.25f, active ? 0.25f : 0.45f, active ? 0.95f : 0.75f);
-    DrawText(hud, label, r.x + 28 * s, r.y + r.h / 2 - 22 * s, 2.4f * s);
-}
-
-void DrawMenu(UObject* hud) {
-    if (oCanvas < 0) oCanvas = api->property_offset(hud, "Canvas");
-    UObject* canvas = oCanvas >= 0 ? F<UObject*>(hud, oCanvas) : nullptr;
-    if (!canvas) return;
-    if (oSizeX < 0) { oSizeX = api->property_offset(canvas, "SizeX"); oSizeY = api->property_offset(canvas, "SizeY"); }
-    gScreenW = float(F<int32_t>(canvas, oSizeX));
-    gScreenH = float(F<int32_t>(canvas, oSizeY));
-    if (!gLoggedHud) { gLoggedHud = true; api->log("cheat_menu: drawing on %.0fx%.0f canvas", gScreenW, gScreenH); }
-    float s = gScreenH / 900.f;  // layout designed for 1600x900
-
-    // Flight buttons: right edge, below the MODS button, visible whenever flying.
-    if (gOn[kFly]) {
-        gUpBtn = {gScreenW - 260 * s, 290 * s, 220 * s, 140 * s};
-        gDownBtn = {gScreenW - 260 * s, 450 * s, 220 * s, 140 * s};
-        DrawFlightButton(hud, gUpBtn, "UP", gVertical > 0, s);
-        DrawFlightButton(hud, gDownBtn, "DOWN", gVertical < 0, s);
-    } else {
-        gUpBtn = gDownBtn = {0, 0, 0, 0};
-    }
-
-    gModsBtn = {gScreenW - 400 * s, 140 * s, 220 * s, 90 * s};
-    DrawRect(hud, gModsBtn, 0.02f, 0.25f, 0.35f, gMenuOpen ? 0.95f : 0.8f);
-    DrawText(hud, gMenuOpen ? "MODS  X" : "MODS", gModsBtn.x + 30 * s, gModsBtn.y + 18 * s, 2.4f * s);
-    if (!gMenuOpen) return;
-
-    float rw = 560 * s, rh = 95 * s, gap = 12 * s;
-    float px = gScreenW - 400 * s - rw - 20 * s, py = 140 * s;
-    for (int i = 0; i < kCount; ++i) {
-        gRows[i] = {px, py + i * (rh + gap), rw, rh};
-        DrawRect(hud, gRows[i], gOn[i] ? 0.05f : 0.1f, gOn[i] ? 0.45f : 0.1f, gOn[i] ? 0.15f : 0.12f, 0.88f);
-        DrawText(hud, kLabels[i], gRows[i].x + 24 * s, gRows[i].y + 22 * s, 2.1f * s);
-        DrawText(hud, gOn[i] ? "ON" : "OFF", gRows[i].x + rw - 120 * s, gRows[i].y + 22 * s, 2.1f * s,
-                 gOn[i] ? 0.4f : 1.f, gOn[i] ? 1.f : 0.4f, 0.4f);
+// ------------------------------------------------------------------ UP / DOWN buttons
+void Draw(void*, float w, float h) {
+    if (!gFly || !gPawn) { gUpBtn = gDownBtn = Rect{}; return; }
+    float s = h / 900.f;
+    gUpBtn = {w - 260 * s, 290 * s, 220 * s, 140 * s};
+    gDownBtn = {w - 260 * s, 450 * s, 220 * s, 140 * s};
+    for (int i = 0; i < 2; ++i) {
+        const Rect& r = i ? gDownBtn : gUpBtn;
+        bool active = gVertical == (i ? -1 : 1);
+        api->draw_rect(r.x, r.y, r.w, r.h, active ? 0.1f : 0.05f, active ? 0.55f : 0.25f, active ? 0.25f : 0.45f,
+                       active ? 0.95f : 0.75f);
+        api->draw_text(i ? "DOWN" : "UP", r.x + 28 * s, r.y + r.h / 2 - 22 * s, 2.4f * s, 1, 1, 1);
     }
 }
 
-void HookedDrawHUD(UObject* hud) {
-    gOrigDrawHUD(hud);
-    DrawMenu(hud);
-}
+constexpr double kHoldThreshold = 0.35;  // longer press = "move while held"
+struct Press { int dir = 0; double start = 0; bool stopped = false; };
+Press gPress[16];
 
-template <typename T>
-bool Hook(T& orig, const char* sym, void* repl) {
-    void* target = api->find_symbol(sym);
-    orig = reinterpret_cast<T>(target ? api->inline_hook(target, repl) : nullptr);
-    if (!orig) api->log("cheat_menu: failed to hook %s", sym);
-    return orig != nullptr;
+int Touch(void*, int phase, int finger, float x, float y) {
+    if (finger < 0 || finger >= 16) return 0;
+    Press& p = gPress[finger];
+    if (phase == 0) {
+        int dir = gUpBtn.Hit(x, y) ? 1 : gDownBtn.Hit(x, y) ? -1 : 0;
+        if (!dir) return 0;
+        p = {dir, Now(), gVertical == dir};  // tapping the active direction stops
+        gVertical = p.stopped ? 0 : dir;
+        return 1;
+    }
+    if (phase == 2) {
+        if (p.dir && !p.stopped && Now() - p.start > kHoldThreshold && gVertical == p.dir) gVertical = 0;
+        p = Press{};
+    }
+    return 1;
 }
 
 }  // namespace
@@ -306,37 +178,32 @@ extern "C" __attribute__((visibility("default"))) const char* ArkMod_Name() { re
 
 extern "C" __attribute__((visibility("default"))) int ArkMod_Init(const ArkModAPI* a) {
     api = a;
+    if (a->version < 2) return 1;
     gPCClass = a->find_object("/Script/Engine.PlayerController");
     UObject* ctrl = a->find_object("/Script/Engine.Controller");
-    if (!gPCClass || !ctrl) return 1;
+    UObject* cmc = a->find_object("/Script/Engine.CharacterMovementComponent");
+    if (!gPCClass || !ctrl || !cmc) return 2;
     gPlayerOff = a->property_offset(gPCClass, "Player");
     oPawnRef = a->property_offset(ctrl, "Pawn");
+    gSetMoveMode = a->find_function(cmc, "SetMovementMode");
+    if (!gSetMoveMode || a->params_size(gSetMoveMode) > 16) return 3;
+    oMoveMode = a->property_offset(gSetMoveMode, "NewMovementMode");
+    oMoveCustom = a->property_offset(gSetMoveMode, "NewCustomMode");
+    if (gPlayerOff < 0 || oPawnRef < 0 || oMoveMode < 0 || oMoveCustom < 0) return 4;
 
-    gDrawRect = Lookup("/Script/Engine.HUD", "DrawRect");
-    gDrawText = Lookup("/Script/Engine.HUD", "DrawText");
-    gSetMoveMode = Lookup("/Script/Engine.CharacterMovementComponent", "SetMovementMode");
-    if (!gDrawRect.f || !gDrawText.f || !gSetMoveMode.f) return 2;
-
-    oRectColor = Off(gDrawRect, "RectColor"); oRectX = Off(gDrawRect, "ScreenX"); oRectY = Off(gDrawRect, "ScreenY");
-    oRectW = Off(gDrawRect, "ScreenW"); oRectH = Off(gDrawRect, "ScreenH");
-    oTxt = Off(gDrawText, "Text"); oTxtColor = Off(gDrawText, "TextColor"); oTxtX = Off(gDrawText, "ScreenX");
-    oTxtY = Off(gDrawText, "ScreenY"); oTxtFont = Off(gDrawText, "Font"); oTxtScale = Off(gDrawText, "Scale");
-    oTxtScalePos = Off(gDrawText, "bScalePosition");
-    oMoveMode = Off(gSetMoveMode, "NewMovementMode"); oMoveCustom = Off(gSetMoveMode, "NewCustomMode");
-    if (gDrawRect.size > 64 || gDrawText.size > 96 || gSetMoveMode.size > 16) return 3;
-    if (oRectColor < 0 || oTxt < 0 || oMoveMode < 0) return 4;
-
-    // (All targets checked: >= 16 bytes long, no PC-relative instructions in the first 16.)
-    bool ok = Hook(gOrigDrawHUD, "_ZN11AShooterHUD7DrawHUDEv", reinterpret_cast<void*>(&HookedDrawHUD));
-    ok &= Hook(gOrigTouchStarted,
-               "_ZN17FSlateApplication14OnTouchStartedERK10TSharedPtrI14FGenericWindowL7ESPMode0EERK9FVector2Dii",
-               reinterpret_cast<void*>(&HookedTouchStarted));
-    ok &= Hook(gOrigTouchMoved, "_ZN17FSlateApplication12OnTouchMovedERK9FVector2Dii",
-               reinterpret_cast<void*>(&HookedTouchMoved));
-    ok &= Hook(gOrigTouchEnded, "_ZN17FSlateApplication12OnTouchEndedERK9FVector2Dii",
-               reinterpret_cast<void*>(&HookedTouchEnded));
-    if (!ok) return 5;
-    a->log("cheat_menu: hooks installed (HUD, touch)");
+    ReadConfig();
+    a->ui_toggle("FLY", &gFly);
+    a->ui_toggle("GOD MODE", &gGod);
+    a->ui_toggle("INFINITE STATS", &gStats);
+    a->ui_toggle("SPEED BOOST", &gSpeed);
+    a->on_draw(Draw, nullptr);
+    a->on_touch(Touch, nullptr);
     a->on_tick(Tick, nullptr);
     return 0;
+}
+
+// Leave the player as we found them (called before unload / hot-reload).
+extern "C" __attribute__((visibility("default"))) void ArkMod_Shutdown() {
+    gFly = gSpeed = gGod = gStats = 0;
+    if (gPawn) Apply();
 }

@@ -7,9 +7,16 @@
  *   const char* ArkMod_Name(void);                 // optional
  *   int         ArkMod_Init(const ArkModAPI* api); // required, return 0 on success
  *
- * ArkMod_Init runs on the loader thread once the engine is up. Do NOT touch game
- * objects there — register hooks/ticks, or use run_on_game_thread().
- * Hook and tick callbacks run on the game thread; engine calls are safe there.
+ * Optional export (API v2):
+ *   void        ArkMod_Shutdown(void);             // undo your changes before unload/reload
+ *
+ * ArkMod_Init and ArkMod_Shutdown run on the game thread. Hook, tick, draw and touch
+ * callbacks run on the game thread too; engine calls are safe there.
+ *
+ * Mods are hot-reloaded when their .so changes and can be switched on/off in the in-game
+ * MODS panel. Everything a mod registered through this API is removed automatically when
+ * it is unloaded. Mods that call inline_hook() cannot be unloaded at runtime (the change
+ * applies after a game restart).
  *
  * Paths look like "/Script/Engine.Actor.ReceiveBeginPlay" or
  * "/Game/PrimalEarth/UI/MainMenuUI.MainMenuUI_C.Construct" (all '.' separated,
@@ -25,7 +32,7 @@
 extern "C" {
 #endif
 
-#define ARKMOD_API_VERSION 1
+#define ARKMOD_API_VERSION 2
 
 typedef struct UObject UObject;
 
@@ -40,6 +47,10 @@ typedef int  (*ArkPreHook)(ArkHookCtx* ctx);   /* return 0 to skip the original 
 typedef void (*ArkPostHook)(ArkHookCtx* ctx);
 typedef void (*ArkTask)(void* user);
 typedef int  (*ArkObjectVisitor)(UObject* obj, void* user); /* return 0 to stop */
+typedef void (*ArkDrawFn)(void* user, float screen_w, float screen_h);
+/* phase: 0 = down, 1 = move, 2 = up. Return 1 on "down" to take the touch: its move/up
+   events then come to you and the game never sees it. */
+typedef int  (*ArkTouchFn)(void* user, int phase, int finger, float x, float y);
 
 /* FText as laid out by UE 4.17 (opaque, 24 bytes). */
 typedef struct ArkText { void* data; void* ref; uint32_t flags; uint32_t pad; } ArkText;
@@ -76,6 +87,22 @@ typedef struct ArkModAPI {
     void     (*make_text)(const char* utf8, ArkText* out);
     int      (*text_to_utf8)(const ArkText* text, char* buf, int n);
     int      (*exec_command)(const char* cmd);               /* via local PlayerController */
+
+    /* ---- v2 (check api->version >= 2) ---- */
+
+    /* Settings from ArkMods/<mod>.ini ("key = value" lines; <mod> = file name without lib/.so).
+       Missing keys are appended to the file with the default, so users can see what to edit.
+       Edits are picked up while the game runs. */
+    const char* (*config_string)(const char* key, const char* def);
+    int      (*config_int)(const char* key, int def);
+    float    (*config_float)(const char* key, float def);
+
+    /* In-game UI (game thread). Coordinates are screen pixels. */
+    void     (*ui_toggle)(const char* label, int* value);    /* ON/OFF row in the MODS panel */
+    void     (*on_draw)(ArkDrawFn fn, void* user);           /* draw over the HUD every frame */
+    void     (*draw_rect)(float x, float y, float w, float h, float r, float g, float b, float a);
+    void     (*draw_text)(const char* ascii, float x, float y, float scale, float r, float g, float b);
+    void     (*on_touch)(ArkTouchFn fn, void* user);
 } ArkModAPI;
 
 #ifdef __cplusplus

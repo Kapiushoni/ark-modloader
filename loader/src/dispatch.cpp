@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -25,12 +26,14 @@ struct Hook {
     ArkPreHook pre;
     ArkPostHook post;
     void* user;
+    const void* owner;
 };
 using HookList = std::vector<Hook>;
 
 struct Task {
     ArkTask fn;
     void* user;
+    const void* owner;
 };
 
 ProcessEventFn gOrig = nullptr;
@@ -41,7 +44,7 @@ std::vector<Hook> gHooks;
 std::atomic<int> gHookCount{0};
 std::atomic<uint32_t> gHooksVersion{0};
 
-// UFunction* -> matching hooks (nullptr = none). Reset on world change / new hooks.
+// UFunction* -> matching hooks (nullptr = none). Reset on world change / hook changes.
 std::mutex gCacheMu;
 std::unordered_map<UObject*, std::shared_ptr<const HookList>> gCache;
 UObject* gCacheWorld = nullptr;
@@ -94,9 +97,15 @@ void RunGameThreadWork() {
         gLastFrame = frame;
         std::vector<Task> ticks;
         { std::lock_guard<std::mutex> l(gTaskMu); ticks = gTicks; }
-        for (const Task& t : ticks) t.fn(t.user);
+        for (const Task& t : ticks) {
+            // A previous tick in this frame may have unloaded this tick's owner.
+            bool alive;
+            { std::lock_guard<std::mutex> l(gTaskMu);
+              alive = std::any_of(gTicks.begin(), gTicks.end(), [&](const Task& x) { return x.fn == t.fn && x.user == t.user; }); }
+            if (alive) t.fn(t.user);
+        }
     }
-    if (gHasTasks.load(std::memory_order_acquire)) {
+    while (gHasTasks.load(std::memory_order_acquire)) {
         std::vector<Task> tasks;
         {
             std::lock_guard<std::mutex> l(gTaskMu);
@@ -111,8 +120,7 @@ void RunGameThreadWork() {
 void Hooked(UObject* self, UObject* func, void* params) {
     gCalls.fetch_add(1, std::memory_order_relaxed);
 
-    if ((gTickCount.load(std::memory_order_relaxed) || gHasTasks.load(std::memory_order_relaxed)) &&
-        static_cast<uint32_t>(gettid()) == engine::GameThreadId())
+    if ((gTickCount.load(std::memory_order_relaxed) || gHasTasks.load(std::memory_order_relaxed)) && OnGameThread())
         RunGameThreadWork();
 
     if (gHookCount.load(std::memory_order_relaxed) == 0) return gOrig(self, func, params);
@@ -145,26 +153,43 @@ bool Install(void* processEvent) {
 
 void CallOriginal(UObject* obj, UObject* func, void* params) { gOrig(obj, func, params); }
 
-int AddHook(const char* pattern, ArkPreHook pre, ArkPostHook post, void* user) {
+bool OnGameThread() { return static_cast<uint32_t>(gettid()) == engine::GameThreadId(); }
+
+int AddHook(const char* pattern, ArkPreHook pre, ArkPostHook post, void* user, const void* owner) {
     if (!pattern || !*pattern || (!pre && !post)) return -1;
     {
         std::lock_guard<std::mutex> l(gHookMu);
-        gHooks.push_back({pattern, pattern[0] != '/', pre, post, user});
+        gHooks.push_back({pattern, pattern[0] != '/', pre, post, user, owner});
         gHookCount = static_cast<int>(gHooks.size());
     }
     gHooksVersion.fetch_add(1);
     return 0;
 }
 
-void Post(ArkTask task, void* user) {
+void Post(ArkTask task, void* user, const void* owner) {
     std::lock_guard<std::mutex> l(gTaskMu);
-    gTasks.push_back({task, user});
+    gTasks.push_back({task, user, owner});
     gHasTasks.store(true, std::memory_order_release);
 }
 
-void AddTick(ArkTask task, void* user) {
+void AddTick(ArkTask task, void* user, const void* owner) {
     std::lock_guard<std::mutex> l(gTaskMu);
-    gTicks.push_back({task, user});
+    gTicks.push_back({task, user, owner});
+    gTickCount = static_cast<int>(gTicks.size());
+}
+
+void RemoveOwner(const void* owner) {
+    {
+        std::lock_guard<std::mutex> l(gHookMu);
+        gHooks.erase(std::remove_if(gHooks.begin(), gHooks.end(), [&](const Hook& h) { return h.owner == owner; }),
+                     gHooks.end());
+        gHookCount = static_cast<int>(gHooks.size());
+    }
+    gHooksVersion.fetch_add(1);
+    std::lock_guard<std::mutex> l(gTaskMu);
+    auto byOwner = [&](const Task& t) { return t.owner == owner; };
+    gTicks.erase(std::remove_if(gTicks.begin(), gTicks.end(), byOwner), gTicks.end());
+    gTasks.erase(std::remove_if(gTasks.begin(), gTasks.end(), byOwner), gTasks.end());
     gTickCount = static_cast<int>(gTicks.size());
 }
 

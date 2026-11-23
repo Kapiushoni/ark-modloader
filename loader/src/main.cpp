@@ -11,10 +11,11 @@
 #include "engine.h"
 #include "log.h"
 #include "mods.h"
+#include "ui.h"
 
 namespace {
 
-constexpr const char* kVersion = "0.2.0";
+constexpr const char* kVersion = "0.4.0";
 
 std::string PackageName() {
     char buf[256] = {};
@@ -61,14 +62,13 @@ void* LoaderThread(void*) {
         engine::Name(engine::World()).c_str());
     SelfTest();
 
-    mods::SetModsDir(modsDir);
-    const std::string cache = "/data/data/" + pkg + "/files/arkmods_cache";
-    int total = mods::LoadNew(cache);
-    LOG("%d mod(s) active; watching %s for new mods", total, modsDir.c_str());
+    if (!ui::Init()) LOGE("in-game MODS panel unavailable (mods still load)");
+    mods::Setup(modsDir, "/data/data/" + pkg + "/files/arkmods_cache");
+    LOG("watching %s (new, changed and removed mods are applied live)", modsDir.c_str());
 
     for (int t = 1;; ++t) {
+        mods::Scan();
         sleep(3);
-        if (int n = mods::LoadNew(cache)) LOG("hot-loaded %d mod(s), %d active", n, total += n);
         if (t % 20 == 0)
             LOG("alive: world=%s ProcessEvent calls=%llu", engine::Name(engine::World()).c_str(),
                 static_cast<unsigned long long>(dispatch::CallCount()));
