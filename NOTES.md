@@ -94,3 +94,18 @@
   In-game panel verified on M_TheIsland: mod list, toggles, FLY + UP/DOWN, disable (unload) and re-enable Cheat Menu.
 - Git: repo initialised; `main` = 0.2.0 baseline, work on branch `v0.4`. Game binaries / re dumps ignored.
 - Attempted relocating hook engine (v0.3.0) was abandoned (see conversation); hook.cpp is the 0.2.0 one.
+
+## v0.5.0 (2026-11-23) — Lua mods + scrollable MODS panel
+- Lua 5.4.7 vendored in `loader/lua` (MIT, sha256 verified), one lua_State per `ArkMods/*.lua`.
+- `lua_runtime.cpp`: `ark` API (log/config/toggle/on_tick/on_draw/on_touch/hook/draw_*/find/objects/
+  player/controller/world/time), reflection-backed UObject / UStruct userdata (__index/__newindex by
+  property name, bound UFunction calls with named or positional params), validity check via
+  GUObjectArray[idx]==ptr (never dereferences a stale pointer), errors via pcall + traceback (rate-limited).
+- UProperty subclass data at +0x78 verified (Struct / PropertyClass / Inner / Enum; Bool ByteOffset 0x79,
+  ByteMask 0x7A).
+- Safety: unload deferred while a script is on the stack (`luart::AnyBusy`); dead Script shells kept so
+  late callbacks bail out; Lua hooks ignored off the game thread; dispatch runs one task batch per call.
+- MODS panel scrolls (drag; tap vs drag threshold; scrollbar); fully-visible rows only.
+- Verified in-game: Lua overlay (struct read), UFunction call with FString return, toggle tap writes
+  JumpZVelocity (525 -> 1575), shutdown() restores it, live reload, syntax + runtime errors logged
+  without crash, 10-row scroll test.

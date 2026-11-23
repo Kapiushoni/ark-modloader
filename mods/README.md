@@ -61,3 +61,52 @@ const char* s = api->config_string("text", "hello");     // указатель �
 Готовая `.so` появится в `loader/build/mods/`, а `tools/deploy.sh` скопирует её в игру. Чтобы обновить один мод без перезапуска игры, достаточно `adb push` нового файла в папку `ArkMods`.
 
 Моды рассчитаны на одиночную игру и неофициальные серверы.
+
+---
+
+# Lua-моды (без компилятора)
+
+Lua-мод — это обычный текстовый файл `имя.lua` в той же папке `ArkMods`. Собирать ничего не нужно.
+Сохранил файл, и мод через пару секунд перезагрузился. Ошибки пишутся в `loader.log` с номером строки, игра от них не падает.
+Пример: `mods/lua_example/lua_example.lua`.
+
+```lua
+MOD_NAME = "My Lua Mod"                       -- название в меню MODS
+
+local fast = ark.toggle("FAST RUN")           -- переключатель в меню (fast.on = true/false)
+local mul  = ark.config("multiplier", 2)      -- настройка из my_lua_mod.ini
+
+ark.on_tick(function()                        -- каждый кадр
+  local pawn = ark.player()                   -- твой персонаж (или nil)
+  if pawn and fast.on then
+    pawn.CharacterMovement.MaxWalkSpeed = 600 * mul   -- любое поле по имени
+  end
+end)
+
+function shutdown()                           -- перед выгрузкой/перезагрузкой: верни как было
+end
+```
+
+## Функции `ark`
+| Функция | Что делает |
+|---|---|
+| `ark.log(...)` / `print(...)` | запись в лог |
+| `ark.config(key, default)` | настройка из `<мод>.ini`; тип как у `default` (число / строка / true-false) |
+| `ark.toggle(label [, default])` | переключатель в меню MODS, значение в `t.on` |
+| `ark.on_tick(fn)` | `fn()` каждый кадр |
+| `ark.on_draw(fn)` | `fn(w, h)` каждый кадр, внутри можно `ark.draw_rect(x,y,w,h, r,g,b,a)` и `ark.draw_text(text, x,y, scale, r,g,b)` |
+| `ark.on_touch(fn)` | `fn(phase, finger, x, y)`; верни `true` на `phase == 0`, чтобы забрать касание у игры |
+| `ark.hook(path, pre, post)` | перехват функции игры: `pre(self, params)` / `post(self, params)`; `pre` вернул `false` — оригинал не вызывается |
+| `ark.player()`, `ark.controller()` | твой персонаж и контроллер |
+| `ark.world()`, `ark.world_name()` | текущий мир |
+| `ark.find(path)` | объект или класс по пути, например `"/Script/Engine.Actor"` |
+| `ark.objects(class [, limit])` | все живые объекты класса (класс — объект или путь) |
+| `ark.time()` | секунды (монотонно) |
+
+## Объекты игры
+- `obj.Свойство` и `obj.Свойство = значение` читают и пишут поле по имени: числа, bool, объекты, enum, `FName`, `FText`, структуры.
+- Структуры читаются как ссылка (`loc.X`, `move.Velocity.Z = 0`), а присваиваются таблицей (`obj.Color = {R=1, G=0, B=0, A=1}`).
+- Статические массивы: `obj:get("CurrentStatusValues", 0)` / `obj:set("CurrentStatusValues", 100, 0)`. Индексы с 0.
+- `obj:Функция{Param = 1}` или `obj:Функция(1, 2)` вызывает функцию игры. Возвращает `ReturnValue` и таблицу всех параметров.
+- `obj:valid()`, `obj:name()`, `obj:path()`, `obj:class()`, `obj:class_name()`, `obj:is_a(classOrPath)`.
+- Обращение к уничтоженному объекту выдаёт ошибку Lua, а не падение игры.

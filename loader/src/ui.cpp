@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 
@@ -8,6 +9,7 @@
 #include "engine.h"
 #include "hook.h"
 #include "log.h"
+#include "lua_runtime.h"
 #include "mods.h"
 
 namespace ui {
@@ -40,13 +42,23 @@ struct Rect {
 };
 bool gOpen = false;
 Rect gModsBtn;
+Rect gView;            // visible panel area (rows are scrolled inside it)
+float gScroll = 0;     // pixels scrolled from the top of the content
+float gContentH = 0;
 struct HitRow { Rect r; std::string file; int* toggle; bool enable; };
-std::vector<HitRow> gHitRows;  // rebuilt every frame the panel is drawn
+std::vector<HitRow> gHitRows;  // rebuilt every frame the panel is drawn (screen coordinates)
 
 constexpr int kMaxFinger = 16;
-enum class FingerOwner { None, Panel, Mod };
-struct Finger { FingerOwner who = FingerOwner::None; Touch handler{}; };
+enum class FingerOwner { None, Panel, PanelDrag, Mod };
+struct Finger {
+    FingerOwner who = FingerOwner::None;
+    Touch handler{};
+    float downX = 0, downY = 0, startScroll = 0;
+    bool dragging = false;
+};
 Finger gFingers[kMaxFinger];
+
+float MaxScroll() { return std::max(0.f, gContentH - gView.h); }
 
 // ------------------------------------------------------------------ drawing
 void Panel() {
@@ -55,36 +67,57 @@ void Panel() {
     DrawRect(gModsBtn.x, gModsBtn.y, gModsBtn.w, gModsBtn.h, 0.02f, 0.25f, 0.35f, gOpen ? 0.95f : 0.8f);
     DrawText(gOpen ? "MODS  X" : "MODS", gModsBtn.x + 30 * s, gModsBtn.y + 18 * s, 2.4f * s, 1, 1, 1);
     gHitRows.clear();
-    if (!gOpen) return;
+    if (!gOpen) { gView = Rect{}; return; }
 
     std::vector<ModRow> mods = mods::PanelRows();
     std::vector<Toggle> toggles;
     { std::lock_guard<std::mutex> l(gMu); toggles = gToggles; }
 
-    float w = 600 * s, x = gModsBtn.x - w - 20 * s, y = 140 * s, bottom = gH - 40 * s;
-    float headerH = 80 * s, rowH = 68 * s, gap = 8 * s;
+    const float w = 600 * s, headerH = 80 * s, rowH = 68 * s, gap = 8 * s;
+    gView = {gModsBtn.x - w - 20 * s, 140 * s, w + 16 * s, gH - 40 * s - 140 * s};
+
+    // Layout in content coordinates first, so we know the total height.
+    struct Item { float y, h; const ModRow* mod; const Toggle* toggle; };
+    std::vector<Item> items;
+    float y = 0;
     for (const ModRow& m : mods) {
-        if (y + headerH > bottom) { DrawText("...", x + 20 * s, y, 2.f * s, 1, 1, 1); break; }
-        Rect r{x, y, w, headerH};
-        DrawRect(r.x, r.y, r.w, r.h, 0.06f, 0.16f, 0.22f, 0.92f);
-        DrawText(m.name.c_str(), r.x + 22 * s, r.y + (m.note.empty() ? 18 : 8) * s, 2.2f * s, 1, 1, 1);
-        if (!m.note.empty()) DrawText(m.note.c_str(), r.x + 22 * s, r.y + 48 * s, 1.2f * s, 1, 0.8f, 0.3f);
-        bool on = m.enabled;
-        DrawText(on ? "ON" : "OFF", r.x + w - 110 * s, r.y + 18 * s, 2.2f * s, on ? 0.4f : 1.f, on ? 1.f : 0.4f, 0.4f);
-        gHitRows.push_back({r, m.file, nullptr, !on});
+        items.push_back({y, headerH, &m, nullptr});
         y += headerH + gap;
         if (!m.loaded) continue;
-        for (const Toggle& t : toggles) {
-            if (t.owner != m.owner) continue;
-            if (y + rowH > bottom) break;
-            Rect tr{x + 40 * s, y, w - 40 * s, rowH};
+        for (const Toggle& t : toggles)
+            if (t.owner == m.owner) { items.push_back({y, rowH, nullptr, &t}); y += rowH + gap; }
+    }
+    gContentH = y;
+    gScroll = std::min(std::max(gScroll, 0.f), MaxScroll());
+
+    const float x = gView.x;
+    for (const Item& it : items) {
+        float sy = gView.y + it.y - gScroll;
+        if (sy < gView.y - 1 || sy + it.h > gView.y + gView.h + 1) continue;  // only fully visible rows
+        if (it.mod) {
+            const ModRow& m = *it.mod;
+            Rect r{x, sy, w, it.h};
+            DrawRect(r.x, r.y, r.w, r.h, 0.06f, 0.16f, 0.22f, 0.92f);
+            DrawText(m.name.c_str(), r.x + 22 * s, r.y + (m.note.empty() ? 18 : 8) * s, 2.2f * s, 1, 1, 1);
+            if (!m.note.empty()) DrawText(m.note.c_str(), r.x + 22 * s, r.y + 48 * s, 1.2f * s, 1, 0.8f, 0.3f);
+            bool on = m.enabled;
+            DrawText(on ? "ON" : "OFF", r.x + w - 110 * s, r.y + 18 * s, 2.2f * s, on ? 0.4f : 1.f, on ? 1.f : 0.4f, 0.4f);
+            gHitRows.push_back({r, m.file, nullptr, !on});
+        } else {
+            const Toggle& t = *it.toggle;
+            Rect tr{x + 40 * s, sy, w - 40 * s, it.h};
             bool v = t.value && *t.value;
             DrawRect(tr.x, tr.y, tr.w, tr.h, v ? 0.05f : 0.1f, v ? 0.45f : 0.1f, v ? 0.15f : 0.12f, 0.88f);
             DrawText(t.label.c_str(), tr.x + 22 * s, tr.y + 16 * s, 1.9f * s, 1, 1, 1);
             DrawText(v ? "ON" : "OFF", tr.x + tr.w - 110 * s, tr.y + 16 * s, 1.9f * s, v ? 0.4f : 1.f, v ? 1.f : 0.4f, 0.4f);
             gHitRows.push_back({tr, "", t.value, false});
-            y += rowH + gap;
         }
+    }
+    if (MaxScroll() > 0) {  // scrollbar: drag the list to scroll
+        float trackX = x + w + 6 * s, barH = std::max(40 * s, gView.h * gView.h / gContentH);
+        float barY = gView.y + (gView.h - barH) * (gScroll / MaxScroll());
+        DrawRect(trackX, gView.y, 8 * s, gView.h, 1, 1, 1, 0.15f);
+        DrawRect(trackX, barY, 8 * s, barH, 1, 1, 1, 0.7f);
     }
 }
 
@@ -104,7 +137,12 @@ void HookedDrawHUD(UObject* hud) {
     gHud = hud;
     std::vector<Draw> draws;
     { std::lock_guard<std::mutex> l(gMu); draws = gDraws; }
-    for (const Draw& d : draws) d.fn(d.user, gW, gH);
+    for (const Draw& d : draws) {
+        bool alive;  // an earlier callback may have caused this one's owner to unload
+        { std::lock_guard<std::mutex> l(gMu);
+          alive = std::any_of(gDraws.begin(), gDraws.end(), [&](const Draw& x) { return x.fn == d.fn && x.user == d.user; }); }
+        if (alive) d.fn(d.user, gW, gH);
+    }
     Panel();  // on top of mod drawings
     gHud = nullptr;
 }
@@ -115,24 +153,20 @@ bool (*gOrigTouchStarted)(void*, const void*, const Vec2&, int, int);
 bool (*gOrigTouchMoved)(void*, const Vec2&, int, int);
 bool (*gOrigTouchEnded)(void*, const Vec2&, int, int);
 
-bool PanelTap(float x, float y) {
-    if (gModsBtn.Hit(x, y)) { gOpen = !gOpen; return true; }
-    if (!gOpen) return false;
+void ApplyEnable(void* p) {
+    if (luart::AnyBusy()) { dispatch::Post(ApplyEnable, p, nullptr); return; }  // not while a script runs
+    auto* q = static_cast<std::pair<std::string, bool>*>(p);
+    mods::SetEnabled(q->first, q->second);
+    delete q;
+}
+
+void ActivateRow(float x, float y) {
     for (const HitRow& r : gHitRows) {
         if (!r.r.Hit(x, y)) continue;
         if (r.toggle) *r.toggle = !*r.toggle;
-        else {
-            // Loading/unloading must not happen in the middle of input handling.
-            auto* req = new std::pair<std::string, bool>(r.file, r.enable);
-            dispatch::Post([](void* p) {
-                auto* q = static_cast<std::pair<std::string, bool>*>(p);
-                mods::SetEnabled(q->first, q->second);
-                delete q;
-            }, req, nullptr);
-        }
-        return true;
+        else dispatch::Post(ApplyEnable, new std::pair<std::string, bool>(r.file, r.enable), nullptr);
+        return;  // (loading/unloading must not happen in the middle of input handling)
     }
-    return false;
 }
 
 bool HookedTouchStarted(void* app, const void* win, const Vec2& p, int idx, int ctrl) {
@@ -140,18 +174,34 @@ bool HookedTouchStarted(void* app, const void* win, const Vec2& p, int idx, int 
         Finger scratch;
         Finger& f = idx >= 0 && idx < kMaxFinger ? gFingers[idx] : scratch;
         f = Finger{};
-        if (PanelTap(p.x, p.y)) { f.who = FingerOwner::Panel; return true; }
+        if (gModsBtn.Hit(p.x, p.y)) { gOpen = !gOpen; f.who = FingerOwner::Panel; return true; }
+        if (gOpen && gView.Hit(p.x, p.y)) {
+            // Decide tap vs. scroll when the finger moves or lifts.
+            f.who = FingerOwner::PanelDrag;
+            f.downX = p.x; f.downY = p.y; f.startScroll = gScroll;
+            return true;
+        }
         std::vector<Touch> touches;
         { std::lock_guard<std::mutex> l(gMu); touches = gTouches; }
-        for (const Touch& t : touches)
-            if (t.fn(t.user, 0, idx, p.x, p.y)) { f.who = FingerOwner::Mod; f.handler = t; return true; }
+        for (const Touch& t : touches) {
+            bool alive;
+            { std::lock_guard<std::mutex> l(gMu);
+              alive = std::any_of(gTouches.begin(), gTouches.end(), [&](const Touch& x) { return x.fn == t.fn && x.user == t.user; }); }
+            if (alive && t.fn(t.user, 0, idx, p.x, p.y)) { f.who = FingerOwner::Mod; f.handler = t; return true; }
+        }
     }
     return gOrigTouchStarted(app, win, p, idx, ctrl);
 }
 
 bool HookedTouchMoved(void* app, const Vec2& p, int idx, int ctrl) {
     if (idx >= 0 && idx < kMaxFinger && gFingers[idx].who != FingerOwner::None) {
-        if (gFingers[idx].who == FingerOwner::Mod) gFingers[idx].handler.fn(gFingers[idx].handler.user, 1, idx, p.x, p.y);
+        Finger& f = gFingers[idx];
+        if (f.who == FingerOwner::Mod) f.handler.fn(f.handler.user, 1, idx, p.x, p.y);
+        if (f.who == FingerOwner::PanelDrag) {
+            float dy = p.y - f.downY;
+            if (!f.dragging && std::abs(dy) > 14.f * gH / 900.f) f.dragging = true;
+            if (f.dragging) gScroll = std::min(std::max(f.startScroll - dy, 0.f), MaxScroll());
+        }
         return true;
     }
     return gOrigTouchMoved(app, p, idx, ctrl);
@@ -159,8 +209,10 @@ bool HookedTouchMoved(void* app, const Vec2& p, int idx, int ctrl) {
 
 bool HookedTouchEnded(void* app, const Vec2& p, int idx, int ctrl) {
     if (idx >= 0 && idx < kMaxFinger && gFingers[idx].who != FingerOwner::None) {
-        if (gFingers[idx].who == FingerOwner::Mod) gFingers[idx].handler.fn(gFingers[idx].handler.user, 2, idx, p.x, p.y);
-        gFingers[idx] = Finger{};
+        Finger& f = gFingers[idx];
+        if (f.who == FingerOwner::Mod) f.handler.fn(f.handler.user, 2, idx, p.x, p.y);
+        if (f.who == FingerOwner::PanelDrag && !f.dragging) ActivateRow(f.downX, f.downY);
+        f = Finger{};
         return true;
     }
     return gOrigTouchEnded(app, p, idx, ctrl);

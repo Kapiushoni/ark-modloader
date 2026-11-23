@@ -30,9 +30,10 @@ install_lib work/libgnustl_shared.so libgnustl_shared.so
 MODS=/sdcard/Android/data/$PKG/files/ArkMods
 "$ADB" -s $S shell mkdir -p $MODS
 for f in $("$ADB" -s $S shell ls $MODS | tr -d '\r'); do
-  case "$f" in *.so) "$ADB" -s $S shell rm -f "$MODS/$f" ;; esac
+  case "$f" in *.so|*.lua) "$ADB" -s $S shell rm -f "$MODS/$f" ;; esac
 done
 for m in loader/build/mods/*.so; do [ -e "$m" ] && "$ADB" -s $S push "$m" $MODS/ >/dev/null; done
+for m in mods/*/*.lua; do [ -e "$m" ] && "$ADB" -s $S push "$m" $MODS/ >/dev/null; done
 echo "mods on device: $("$ADB" -s $S shell ls $MODS | tr -d '\r' | tr '\n' ' ')"
 
 "$ADB" -s $S logcat -c

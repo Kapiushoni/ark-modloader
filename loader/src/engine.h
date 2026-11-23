@@ -27,6 +27,14 @@ std::string ClassAndPath(UObject* o);
 
 UObject* FindObject(const char* path);
 bool IsA(UObject* o, UObject* cls);
+bool IsValid(UObject* o);              // pointer is a live entry of GUObjectArray
+UObject* ResolveWeak(const ue4::FWeakObjectPtr& w);
+std::string NameToString(const ue4::FName& n);
+ue4::FName MakeName(const char* utf8);  // FName(..., FNAME_Add)
+std::string TypeOf(UObject* prop);     // "FloatProperty", "StructProperty", ...
+bool IsProperty(UObject* field);
+bool IsFunction(UObject* field);
+UObject* LocalPlayerController();
 bool IsCDO(UObject* o);
 
 UObject* FindField(UObject* strct, const char* name);   // walks supers

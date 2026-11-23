@@ -83,7 +83,12 @@ constexpr int kProp_ArrayDim       = 0x30;
 constexpr int kProp_ElementSize    = 0x34;
 constexpr int kProp_Flags          = 0x38;  // uint64 EPropertyFlags
 constexpr int kProp_Offset         = 0x50;  // Offset_Internal
+constexpr int kProp_Extra         = 0x78;  // Struct* / PropertyClass* / Inner* / Enum* (verified)
+constexpr int kBool_ByteOffset     = 0x79;  // UBoolProperty::ByteOffset
+constexpr int kBool_ByteMask       = 0x7A;  // UBoolProperty::ByteMask
 constexpr uint64_t CPF_Parm        = 0x80;
+constexpr uint64_t CPF_OutParm     = 0x100;
+constexpr uint64_t CPF_ReturnParm  = 0x400;
 constexpr int32_t  RF_ClassDefaultObject = 0x10;
 
 template <typename T>
@@ -95,6 +100,18 @@ struct FString {
     TCHAR*  Data = nullptr;
     int32_t Num = 0;  // includes terminator
     int32_t Max = 0;
+};
+
+template <typename T>
+struct TArray {
+    T*      Data;
+    int32_t Num;
+    int32_t Max;
+};
+
+struct FWeakObjectPtr {
+    int32_t ObjectIndex;
+    int32_t ObjectSerialNumber;
 };
 
 struct FText {  // opaque, 0x18

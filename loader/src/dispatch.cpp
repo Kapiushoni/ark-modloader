@@ -105,7 +105,7 @@ void RunGameThreadWork() {
             if (alive) t.fn(t.user);
         }
     }
-    while (gHasTasks.load(std::memory_order_acquire)) {
+    if (gHasTasks.load(std::memory_order_acquire)) {  // one batch: tasks may re-post themselves
         std::vector<Task> tasks;
         {
             std::lock_guard<std::mutex> l(gTaskMu);

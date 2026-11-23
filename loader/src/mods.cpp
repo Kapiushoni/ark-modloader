@@ -19,6 +19,7 @@
 #include "engine.h"
 #include "hook.h"
 #include "log.h"
+#include "lua_runtime.h"
 #include "ui.h"
 
 namespace mods {
@@ -79,7 +80,9 @@ void Refresh(Config& c) {
 
 // ------------------------------------------------------------------ registry
 struct Mod {
-    std::string file;              // libfoo.so
+    std::string file;              // libfoo.so or foo.lua
+    bool lua = false;
+    luart::Script* script = nullptr;
     std::string id;                // foo
     std::string name;              // ArkMod_Name() or id
     bool enabled = true;           // user's choice
@@ -113,7 +116,13 @@ const void* OwnerOf(const void* addr) {
     return dladdr(addr, &info) ? info.dli_fbase : nullptr;
 }
 
+bool EndsWith(const std::string& s, const char* suf) {
+    size_t n = strlen(suf);
+    return s.size() > n && s.compare(s.size() - n, n, suf) == 0;
+}
+
 std::string IdOf(const std::string& file) {
+    if (EndsWith(file, ".lua")) return file.substr(0, file.size() - 4);
     std::string id = file.substr(0, file.size() - 3);  // drop .so
     if (id.compare(0, 3, "lib") == 0) id = id.substr(3);
     return id;
@@ -281,6 +290,29 @@ void Load(Mod& m) {
     m.size = st.st_size;
     m.note.clear();
 
+    if (m.lua) {
+        ++m.generation;
+        luart::Host host;
+        host.modsDir = gModsDir;
+        Mod* mp = &m;
+        host.config = [mp](const std::string& key, const std::string& def) {
+            std::lock_guard<std::recursive_mutex> l(gMu);
+            return std::string(ConfigLookup(mp, key.c_str(), def));
+        };
+        std::string name, err;
+        m.script = luart::Load(src, m.id, host, &name, &err);
+        if (!m.script) {
+            m.note = "script error - see loader.log";
+            LOGE("lua mod %s failed: %s", m.file.c_str(), err.c_str());
+            return;
+        }
+        m.name = name;
+        m.base = m.script;
+        m.loaded = true;
+        LOG("loaded lua mod '%s' (%s, gen %d)", m.name.c_str(), m.file.c_str(), m.generation);
+        return;
+    }
+
     // Copy to app-private storage (no exec from /sdcard) under a new name per generation,
     // so a changed file is really loaded again instead of returning the cached handle.
     // The counter is process-wide: a cache path must never be reused while an older copy
@@ -316,6 +348,14 @@ void Load(Mod& m) {
 bool Unload(Mod& m) {
     if (!m.loaded) return true;
     if (m.usesInlineHooks) return false;
+    if (m.lua) {
+        luart::Unload(m.script);  // runs shutdown(), drops registrations, closes the state
+        m.script = nullptr;
+        m.loaded = false;
+        m.base = nullptr;
+        LOG("unloaded lua mod '%s'", m.name.c_str());
+        return true;
+    }
     if (m.shutdown) m.shutdown();
     dispatch::RemoveOwner(m.base);
     ui::RemoveOwner(m.base);
@@ -331,6 +371,10 @@ enum class Op { Load, Reload, Unload, Remove };
 struct Request { std::string file; Op op; };
 
 void RunRequest(void* p) {
+    if (luart::AnyBusy()) {  // we were reached from inside a script callback: try again later
+        dispatch::Post(RunRequest, p, nullptr);
+        return;
+    }
     std::unique_ptr<Request> r(static_cast<Request*>(p));
     std::lock_guard<std::recursive_mutex> l(gMu);
     Mod* m = ByFile(r->file);
@@ -389,7 +433,7 @@ void Scan() {
         while (dirent* e = readdir(d)) {
             std::string n = e->d_name;
             struct stat st{};
-            if (n.size() > 3 && n.compare(n.size() - 3, 3, ".so") == 0 && stat((gModsDir + "/" + n).c_str(), &st) == 0)
+            if ((EndsWith(n, ".so") || EndsWith(n, ".lua")) && stat((gModsDir + "/" + n).c_str(), &st) == 0)
                 files[n] = st;
         }
         closedir(d);
@@ -404,6 +448,7 @@ void Scan() {
             auto nm = std::make_unique<Mod>();
             nm->file = file;
             nm->id = IdOf(file);
+            nm->lua = EndsWith(file, ".lua");
             nm->name = nm->id;
             auto it = enabledIni.find(file);
             nm->enabled = it == enabledIni.end() || it->second != "0";
@@ -442,7 +487,12 @@ void SetEnabled(const std::string& file, bool enabled) {
 std::vector<ui::ModRow> PanelRows() {
     std::lock_guard<std::recursive_mutex> l(gMu);
     std::vector<ui::ModRow> rows;
-    for (auto& m : gMods) rows.push_back({m->file, m->name, m->enabled, m->loaded, m->note, m->base});
+    for (auto& m : gMods) {
+        std::string note = m->note;
+        if (note.empty() && m->lua && m->loaded && luart::ErrorCount(m->script) > 0)
+            note = "script errors - see loader.log";
+        rows.push_back({m->file, m->name, m->enabled, m->loaded, note, m->base});
+    }
     return rows;
 }
 

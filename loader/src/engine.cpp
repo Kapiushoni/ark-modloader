@@ -20,6 +20,7 @@ UObject* (*gStaticFindObject)(UObject*, UObject*, const TCHAR*, bool) = nullptr;
 FText (*gTextFromString)(const FString&) = nullptr;
 const FString& (*gTextToString)(const FText*) = nullptr;
 void (*gMemFree)(void*) = nullptr;
+void (*gNameCtor)(FName*, const TCHAR*, int) = nullptr;
 
 // Non-trivial so the AArch64 ABI returns it indirectly (x8), like the real FString.
 struct FStringRet {
@@ -53,6 +54,7 @@ bool Init(void* lib) {
     ok &= Resolve(gTextFromString, "_ZN5FText10FromStringERK7FString");
     ok &= Resolve(gTextToString, "_ZNK5FText8ToStringEv");
     ok &= Resolve(gMemFree, "_ZN7FMemory4FreeEPv");
+    ok &= Resolve(gNameCtor, "_ZN5FNameC1EPKw9EFindName");
     ok &= Resolve(gConsoleCommand, "_ZN17APlayerController14ConsoleCommandERK7FStringb");
     return ok;
 }
@@ -104,14 +106,36 @@ static FString TempFString(std::wstring& w) {
 
 // ---------------------------------------------------------------- names / objects
 
-std::string Name(UObject* o) {
-    if (!o) return "None";
+std::string NameToString(const FName& n) {
     TNameEntryArray* names = Names();
-    FNameEntry* e = names ? names->Get(o->NamePrivate.ComparisonIndex) : nullptr;
+    FNameEntry* e = names ? names->Get(n.ComparisonIndex) : nullptr;
     if (!e) return "<bad name>";
     std::string s = e->IsWide() ? ToUtf8(e->WideName) : std::string(e->AnsiName);
-    if (o->NamePrivate.Number > 0) s += "_" + std::to_string(o->NamePrivate.Number - 1);
+    if (n.Number > 0) s += "_" + std::to_string(n.Number - 1);
     return s;
+}
+
+std::string Name(UObject* o) { return o ? NameToString(o->NamePrivate) : "None"; }
+
+FName MakeName(const char* utf8) {
+    std::wstring w = FromUtf8(utf8);
+    FName n{0, 0};
+    gNameCtor(&n, w.c_str(), 1 /*FNAME_Add*/);
+    return n;
+}
+
+bool IsValid(UObject* o) {
+    if (!o || (reinterpret_cast<uintptr_t>(o) & 7)) return false;
+    FFixedUObjectArray& arr = gObjects->ObjObjects;
+    int32_t i = o->InternalIndex;  // reading this is safe only if o points to mapped memory...
+    return i >= 0 && i < arr.NumElements && arr.Objects[i].Object == o;
+}
+
+UObject* ResolveWeak(const FWeakObjectPtr& w) {
+    FFixedUObjectArray& arr = gObjects->ObjObjects;
+    if (w.ObjectIndex < 0 || w.ObjectIndex >= arr.NumElements) return nullptr;
+    const FUObjectItem& it = arr.Objects[w.ObjectIndex];
+    return it.Object && it.SerialNumber == w.ObjectSerialNumber ? it.Object : nullptr;
 }
 
 std::string Path(UObject* o) {
@@ -188,21 +212,33 @@ std::string TextToUtf8(const FText& t) {
     return s.Data ? ToUtf8(s.Data) : std::string();
 }
 
-bool ExecCommand(const char* cmd) {
-    UObject* pcClass = FindObject("/Script/Engine.PlayerController");
-    int playerOff = PropertyOffset(pcClass, "Player");
-    if (!pcClass || playerOff < 0) return false;
+std::string TypeOf(UObject* prop) { return prop ? Name(reinterpret_cast<UObject*>(prop->ClassPrivate)) : ""; }
+bool IsProperty(UObject* f) { return f && IsA(f, PropertyClass()); }
+bool IsFunction(UObject* f) {
+    static UObject* fn = FindObject("/Script/CoreUObject.Function");
+    return f && IsA(f, fn);
+}
+
+UObject* LocalPlayerController() {
+    static UObject* pcClass = FindObject("/Script/Engine.PlayerController");
+    static int playerOff = PropertyOffset(pcClass, "Player");
+    if (!pcClass || playerOff < 0) return nullptr;
     FFixedUObjectArray& arr = gObjects->ObjObjects;
     for (int i = 0; i < arr.NumElements; ++i) {
         UObject* o = arr.Objects[i].Object;
-        if (!o || IsCDO(o) || !IsA(o, pcClass) || !At<void*>(o, playerOff)) continue;
-        std::wstring w = FromUtf8(cmd);
-        FString f = TempFString(w);
-        FStringRet r = gConsoleCommand(o, f, true);
-        if (r.s.Data) gMemFree(r.s.Data);
-        return true;
+        if (o && !IsCDO(o) && IsA(o, pcClass) && At<void*>(o, playerOff)) return o;
     }
-    return false;
+    return nullptr;
+}
+
+bool ExecCommand(const char* cmd) {
+    UObject* pc = LocalPlayerController();
+    if (!pc) return false;
+    std::wstring w = FromUtf8(cmd);
+    FString f = TempFString(w);
+    FStringRet r = gConsoleCommand(pc, f, true);
+    if (r.s.Data) gMemFree(r.s.Data);
+    return true;
 }
 
 }  // namespace engine
