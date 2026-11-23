@@ -1,0 +1,13 @@
+# Game binaries and research dumps (copyrighted / large) — never commit
+re/
+backup/
+work/
+*.apk
+*.xapk
+*.obb
+
+# Build output and tooling
+loader/build/
+third_party/
+tools/.venv/
+tools/libdir.txt
