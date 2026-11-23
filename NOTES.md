@@ -91,6 +91,6 @@
   still mapped → overwrote live code → SIGSEGV. Fixed: process-wide copy counter + cache wiped at start.
 - cheat_menu and hello_menu ported to v2 (no own inline hooks → fully hot-reloadable).
 - Verified on MuMu (main menu): load, config edit live, reload, delete/unload, re-add ×2, no crash.
-  In-game panel not yet verified by the user.
+  In-game panel verified on M_TheIsland: mod list, toggles, FLY + UP/DOWN, disable (unload) and re-enable Cheat Menu.
 - Git: repo initialised; `main` = 0.2.0 baseline, work on branch `v0.4`. Game binaries / re dumps ignored.
 - Attempted relocating hook engine (v0.3.0) was abandoned (see conversation); hook.cpp is the 0.2.0 one.
