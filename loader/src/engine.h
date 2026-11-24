@@ -2,6 +2,7 @@
 #pragma once
 #include <string>
 
+#include "elfsym.h"
 #include "ue4.h"
 
 namespace engine {
@@ -11,7 +12,7 @@ using ue4::FUObjectArray;
 using ue4::TCHAR;
 using ue4::UObject;
 
-bool Init(void* libue4);          // resolve symbols (call once libUE4 is loaded)
+bool Init(void* libue4, const elfsym::Image* image = nullptr);  // resolve symbols (libUE4 handle, or its ELF image)
 bool Ready();                     // names + objects populated
 void* Sym(const char* name);
 

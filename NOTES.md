@@ -126,3 +126,20 @@
 - Test finding fixed: the `py` launcher existed without a registered Python — installer now picks the
   first interpreter that actually runs.
 - No-root / phone installer (APK repack) deliberately not done.
+
+## v0.7.0 (2026-11-24) — Magisk module for phones (Zygisk)
+- `magisk/` + `tools/make_magisk.sh` -> `dist/ArkModLoader-<ver>-magisk.zip` (Magisk / KernelSU+ZygiskNext,
+  arm64). Game files are NOT modified: Zygisk module (`magisk/zygisk/module.cpp`, target `arkml_zygisk`)
+  matches nice_name == game package in preAppSpecialize, reads `loader/libarkmodloader.so` + `mods/*` +
+  `VERSION` from the module dir; in postAppSpecialize stages the mods in `<app>/files/arkml_bundle` and
+  loads the loader (module fd via android_dlopen_ext -> memfd -> copy in code_cache). Other apps:
+  DLCLOSE_MODULE_LIBRARY. `zygisk.hpp` vendored from zygisk-module-sample with API version 5 -> 4.
+- Injected loader sits in the default linker namespace, libUE4 in the app's classloader namespace ->
+  `dlopen("libUE4.so", NOLOAD)` fails. New `elfsym.cpp`: dl_iterate_phdr + GNU/SysV hash lookup of
+  dynamic symbols (IFUNC resolved with bionic's arm64 args); `engine::Sym` falls back to it.
+  Wait for libUE4 extended to 30 min (loader now starts at process start).
+- Loader copies `files/arkml_bundle/*` into ArkMods once per bundle VERSION (marker `ArkMods/.bundled_version`).
+- Verified on MuMu: forced ELF path (`-DARKML_FORCE_ELFSYM`) with the real libUE4 — symbols, ProcessEvent
+  hook, engine ready, MODS panel, all mods load; bundle seeding + no re-seed after deleting a mod;
+  normal dlopen path still works. ELF lookup == dlsym for libc/libm/liblog on x86_64 and arm64.
+- NOT tested: the Zygisk module itself on a real Magisk phone (MuMu has its own root, no Zygisk).

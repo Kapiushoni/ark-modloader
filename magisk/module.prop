@@ -1,0 +1,6 @@
+id=arkmodloader
+name=ArkModLoader
+version=v@VERSION@
+versionCode=@VERSIONCODE@
+author=ArkModLoader
+description=Загрузчик модов для ARK Mobile 2.0.29 (нужен Zygisk). Моды: Android/data/com.studiowildcard.wardrumstudios.ark/files/ArkMods

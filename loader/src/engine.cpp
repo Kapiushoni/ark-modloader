@@ -4,6 +4,7 @@
 
 #include <cstring>
 
+#include "elfsym.h"
 #include "log.h"
 
 namespace engine {
@@ -11,6 +12,7 @@ using namespace ue4;
 namespace {
 
 void* gLib = nullptr;
+elfsym::Image gImage;  // used when libUE4 is not reachable through dlopen
 FUObjectArray* gObjects = nullptr;
 TNameEntryArray* (*gGetNames)() = nullptr;
 UObject** gWorld = nullptr;
@@ -33,7 +35,10 @@ TNameEntryArray* Names() { return gGetNames ? gGetNames() : nullptr; }
 
 }  // namespace
 
-void* Sym(const char* name) { return gLib ? dlsym(gLib, name) : nullptr; }
+void* Sym(const char* name) {
+    if (gLib) return dlsym(gLib, name);
+    return elfsym::Lookup(gImage, name);
+}
 
 template <typename T>
 static bool Resolve(T& out, const char* name) {
@@ -42,8 +47,9 @@ static bool Resolve(T& out, const char* name) {
     return out != nullptr;
 }
 
-bool Init(void* lib) {
+bool Init(void* lib, const elfsym::Image* image) {
     gLib = lib;
+    if (image) gImage = *image;
     bool ok = true;
     ok &= Resolve(gObjects, "GUObjectArray");
     ok &= Resolve(gGetNames, "_ZN5FName8GetNamesEv");
