@@ -17,6 +17,7 @@ for b in install uninstall; do sed 's/$/\r/' installer/$b.bat > "$OUT/$b.bat"; d
 sed 's/$/\r/' installer/README.txt > "$OUT/README.txt"
 cp loader/lua/LICENSE "$OUT/files/LUA_LICENSE.txt"
 echo "$VER" > "$OUT/VERSION"
+cp LICENSE "$OUT/LICENSE.txt"
 PY=""; for c in python3 python; do "$c" -c "import zipfile" 2>/dev/null && { PY=$c; break; }; done  # skips the Windows Store stub
 "$PY" -I tools/zipdir.py "$OUT" "$OUT.zip" --prefix "ArkModLoader-$VER" >/dev/null
 echo "built $OUT and $OUT.zip"; ls -la "$OUT" "$OUT"/*/
