@@ -5,6 +5,13 @@ MOD_NAME = "Lua Example"
 local jump = ark.toggle("SUPER JUMP")          -- row in the MODS panel
 local showPos = ark.toggle("SHOW POSITION", true)
 
+-- A window (MODS panel -> Lua Example -> "Lua Example" OPEN >): built from the game's own UI.
+local win = ark.window("Lua Example")
+local posLabel = win:label("Position: -")
+local mult = win:number("JUMP MULTIPLIER", 1, 10, 0.5, 3)          -- min, max, step, value
+local posLabel_text = nil
+win:button("LOG POSITION", function() ark.log(posLabel_text or "no position") end)
+
 local origJump = nil
 local lastWorld = nil
 local reportedTime = false
@@ -25,10 +32,17 @@ ark.on_tick(function()
   -- Reflection: read/write any property by name.
   if jump.on then
     origJump = origJump or move.JumpZVelocity
-    move.JumpZVelocity = origJump * ark.config("jump_multiplier", 3)
+    move.JumpZVelocity = origJump * mult.value
   elseif origJump then
     move.JumpZVelocity = origJump
     origJump = nil
+  end
+
+  -- Keep the window's label current (cheap: the loader only redraws changed text).
+  local loc = pawn.RootComponent and pawn.RootComponent.RelativeLocation
+  if loc then
+    posLabel_text = string.format("Position: X %.0f  Y %.0f  Z %.0f", loc.X, loc.Y, loc.Z)
+    posLabel:set_text(posLabel_text)
   end
 
   -- Calling a game function (method syntax on any UObject).

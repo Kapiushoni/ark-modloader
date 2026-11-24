@@ -41,6 +41,6 @@ fi
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 
 ui_print "- Перезагрузите телефон и запустите игру."
-ui_print "  Кнопка MODS — справа вверху в одиночной игре."
+ui_print "  MODS — пункт под EXIT в главном меню и кнопка сверху в игре."
 ui_print "  Моды: Android/data/$PKG/files/ArkMods"
 ui_print "  Не добавляйте игру в DenyList Magisk — туда модули не загружаются."

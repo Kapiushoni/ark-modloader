@@ -16,6 +16,7 @@
 #include <mutex>
 
 #include "dispatch.h"
+#include "events.h"
 #include "engine.h"
 #include "hook.h"
 #include "log.h"
@@ -36,6 +37,7 @@ struct Config {
     off_t size = -1;
     double lastCheck = -1;
     std::map<std::string, std::string> kv;
+    std::vector<std::string> order;  // keys in file order
 };
 
 double Now() {
@@ -49,15 +51,19 @@ std::string Trim(const std::string& s) {
     return a == std::string::npos ? "" : s.substr(a, b - a + 1);
 }
 
-std::map<std::string, std::string> ReadIni(const std::string& path) {
+std::map<std::string, std::string> ReadIni(const std::string& path, std::vector<std::string>* order = nullptr) {
     std::map<std::string, std::string> kv;
+    if (order) order->clear();
     if (FILE* f = fopen(path.c_str(), "r")) {
         char line[1024];
         while (fgets(line, sizeof line, f)) {
             std::string l = Trim(line);
             if (l.empty() || l[0] == '#' || l[0] == ';') continue;
             size_t eq = l.find('=');
-            if (eq != std::string::npos) kv[Trim(l.substr(0, eq))] = Trim(l.substr(eq + 1));
+            if (eq == std::string::npos) continue;
+            std::string k = Trim(l.substr(0, eq));
+            if (order && !kv.count(k)) order->push_back(k);
+            kv[k] = Trim(l.substr(eq + 1));
         }
         fclose(f);
     }
@@ -75,7 +81,7 @@ void Refresh(Config& c) {
     if (mt == c.mtime && sz == c.size) return;
     c.mtime = mt;
     c.size = sz;
-    c.kv = ReadIni(c.path);
+    c.kv = ReadIni(c.path, &c.order);
 }
 
 // ------------------------------------------------------------------ registry
@@ -96,6 +102,7 @@ struct Mod {
     const void* base = nullptr;    // module base while loaded (= owner of its registrations)
     void (*shutdown)() = nullptr;
     Config cfg;
+    std::map<std::string, ui::Setting> ranges;  // declared ranges of numeric settings (per load)
 };
 
 std::recursive_mutex gMu;
@@ -187,8 +194,14 @@ void ConfigWrite(Mod* m, const std::string& key, const std::string& value) {
         for (const std::string& l : lines) fprintf(f, "%s\n", l.c_str());
         fclose(f);
     }
+    if (!m->cfg.kv.count(key)) m->cfg.order.push_back(key);
     m->cfg.kv[key] = value;
     m->cfg.lastCheck = -1;
+}
+
+void DeclareRange(Mod* m, const std::string& key, float min, float max, float step) {
+    if (!m || !(max >= min)) return;
+    m->ranges[key] = ui::Setting{key, "", true, min, max, step > 0 ? step : 0};
 }
 
 __attribute__((noinline)) const char* ApiConfigString(const char* key, const char* def) {
@@ -213,6 +226,20 @@ __attribute__((noinline)) float ApiConfigFloat(const char* key, float def) {
 }
 __attribute__((noinline)) void ApiUiToggle(const char* label, int* value) {
     ui::AddToggle(label, value, OwnerOf(__builtin_return_address(0)));
+}
+
+__attribute__((noinline)) void ApiConfigRange(const char* key, float min, float max, float step) {
+    std::lock_guard<std::recursive_mutex> l(gMu);
+    if (key) DeclareRange(CALLER_MOD(), key, min, max, step);
+}
+
+__attribute__((noinline)) void ApiConfigSet(const char* key, const char* value) {
+    std::lock_guard<std::recursive_mutex> l(gMu);
+    if (Mod* m = CALLER_MOD(); m && key) ConfigWrite(m, key, value ? value : "");
+}
+
+__attribute__((noinline)) int ApiUiWindow(const char* title) {
+    return ui::NewWindow(title, OwnerOf(__builtin_return_address(0)));
 }
 
 void ApiLog(const char* fmt, ...) {
@@ -292,6 +319,24 @@ ArkModAPI MakeApi() {
     a.draw_rect = ui::DrawRect;
     a.draw_text = ui::DrawText;
     a.on_touch = [](ArkTouchFn fn, void* u) { ui::AddTouch(fn, u, OwnerOf(reinterpret_cast<void*>(fn))); };
+    // v3
+    a.ui_window = ApiUiWindow;
+    a.config_range = ApiConfigRange;
+    a.config_set = ApiConfigSet;
+    a.on_new_object = [](::UObject* cls, ArkObjectFn fn, void* u) {
+        events::OnNewObject(U(cls), reinterpret_cast<events::NewObjectFn>(fn), u, OwnerOf(reinterpret_cast<void*>(fn)));
+    };
+    a.load_object = [](const char* path) { return C(engine::LoadObject(path)); };
+    a.spawn_actor = [](::UObject* cls, float x, float y, float z, float yaw) {
+        return C(engine::SpawnActor(U(cls), x, y, z, yaw));
+    };
+    a.ui_label = ui::AddLabel;
+    a.ui_button = ui::AddButton;
+    a.ui_check = ui::AddCheck;
+    a.ui_number = ui::AddNumber;
+    a.ui_set_text = ui::SetText;
+    a.ui_show = ui::ShowWindow;
+    a.ui_visible = [](int w) { return ui::WindowVisible(w) ? 1 : 0; };
     return a;
 }
 
@@ -319,6 +364,7 @@ void Load(Mod& m) {
     m.mtime = st.st_mtime;
     m.size = st.st_size;
     m.note.clear();
+    m.ranges.clear();
 
     if (m.lua) {
         ++m.generation;
@@ -328,6 +374,14 @@ void Load(Mod& m) {
         host.config = [mp](const std::string& key, const std::string& def) {
             std::lock_guard<std::recursive_mutex> l(gMu);
             return std::string(ConfigLookup(mp, key.c_str(), def));
+        };
+        host.save = [mp](const std::string& key, const std::string& value) {
+            std::lock_guard<std::recursive_mutex> l(gMu);
+            ConfigWrite(mp, key, value);
+        };
+        host.range = [mp](const std::string& key, float mn, float mx, float step) {
+            std::lock_guard<std::recursive_mutex> l(gMu);
+            DeclareRange(mp, key, mn, mx, step);
         };
         std::string name, err;
         m.script = luart::Load(src, m.id, host, &name, &err);
@@ -365,6 +419,7 @@ void Load(Mod& m) {
     if (rc != 0) {
         dispatch::RemoveOwner(m.base);
         ui::RemoveOwner(m.base);
+        events::RemoveOwner(m.base);
         m.loaded = false;
         m.note = "init failed (" + std::to_string(rc) + ")";
         LOGE("mod '%s' init returned %d", m.name.c_str(), rc);
@@ -389,6 +444,7 @@ bool Unload(Mod& m) {
     if (m.shutdown) m.shutdown();
     dispatch::RemoveOwner(m.base);
     ui::RemoveOwner(m.base);
+    events::RemoveOwner(m.base);
     m.loaded = false;
     m.base = nullptr;
     // The library stays mapped (no dlclose): a callback might still be on another thread's
@@ -528,6 +584,30 @@ void SaveToggle(const void* owner, const std::string& label, int value) {
     if (Mod* m = ByBase(owner)) ConfigWrite(m, "toggle." + label, value ? "1" : "0");
 }
 
+const std::string& Dir() { return gModsDir; }
+
+std::vector<ui::Setting> Settings(const void* owner) {
+    std::lock_guard<std::recursive_mutex> l(gMu);
+    std::vector<ui::Setting> out;
+    Mod* m = ByBase(owner);
+    if (!m) return out;
+    Refresh(m->cfg);
+    for (const std::string& k : m->cfg.order) {
+        if (k.compare(0, 7, "toggle.") == 0) continue;
+        auto r = m->ranges.find(k);
+        ui::Setting s = r != m->ranges.end() ? r->second : ui::Setting{k, "", false, 0, 0, 0};
+        s.key = k;
+        s.value = m->cfg.kv[k];
+        out.push_back(s);
+    }
+    return out;
+}
+
+void SaveSetting(const void* owner, const std::string& key, const std::string& value) {
+    std::lock_guard<std::recursive_mutex> l(gMu);
+    if (Mod* m = ByBase(owner)) ConfigWrite(m, key, value);
+}
+
 std::vector<ui::ModRow> PanelRows() {
     std::lock_guard<std::recursive_mutex> l(gMu);
     std::vector<ui::ModRow> rows;
@@ -535,7 +615,12 @@ std::vector<ui::ModRow> PanelRows() {
         std::string note = m->note;
         if (note.empty() && m->lua && m->loaded && luart::ErrorCount(m->script) > 0)
             note = "script errors - see loader.log";
-        rows.push_back({m->file, m->name, m->enabled, m->loaded, note, m->base});
+        bool settings = false;
+        if (m->loaded) {
+            Refresh(m->cfg);
+            for (const std::string& k : m->cfg.order) settings |= k.compare(0, 7, "toggle.") != 0;
+        }
+        rows.push_back({m->file, m->name, m->enabled, m->loaded, note, m->base, settings});
     }
     return rows;
 }

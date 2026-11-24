@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(arkmodloader SHARED
-    src/main.cpp src/elfsym.cpp src/hook.cpp src/engine.cpp src/dispatch.cpp src/mods.cpp src/log.cpp src/ui.cpp src/lua_runtime.cpp)
+    src/main.cpp src/elfsym.cpp src/umg.cpp src/sdk.cpp src/events.cpp src/i18n.cpp src/hook.cpp src/engine.cpp src/dispatch.cpp src/mods.cpp src/log.cpp src/ui.cpp src/lua_runtime.cpp)
 
 # Lua 5.4.7 (vendored, MIT): built as C into the loader.
 file(GLOB LUA_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/lua/*.c)

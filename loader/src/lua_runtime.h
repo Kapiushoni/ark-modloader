@@ -9,6 +9,10 @@ namespace luart {
 struct Host {
     // Settings lookup for this script (ArkMods/<id>.ini, same mechanism as C mods).
     std::function<std::string(const std::string& key, const std::string& def)> config;
+    // Declares the range the SETTINGS window offers for a numeric setting.
+    std::function<void(const std::string& key, float min, float max, float step)> range;
+    // Writes key = value into the script's ini (other lines kept).
+    std::function<void(const std::string& key, const std::string& value)> save;
     std::string modsDir;
 };
 

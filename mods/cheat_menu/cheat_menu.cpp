@@ -191,6 +191,11 @@ extern "C" __attribute__((visibility("default"))) int ArkMod_Init(const ArkModAP
     oMoveCustom = a->property_offset(gSetMoveMode, "NewCustomMode");
     if (gPlayerOff < 0 || oPawnRef < 0 || oMoveMode < 0 || oMoveCustom < 0) return 4;
 
+    if (a->version >= 3) {  // what the SETTINGS window offers for each value
+        a->config_range("fly_speed", 100, 5000, 100);
+        a->config_range("vertical_speed", 100, 3000, 100);
+        a->config_range("speed_multiplier", 1, 10, 0.5f);
+    }
     ReadConfig();
     a->ui_toggle("FLY", &gFly);
     a->ui_toggle("GOD MODE", &gGod);

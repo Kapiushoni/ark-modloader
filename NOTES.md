@@ -143,3 +143,94 @@
   hook, engine ready, MODS panel, all mods load; bundle seeding + no re-seed after deleting a mod;
   normal dlopen path still works. ELF lookup == dlsym for libc/libm/liblog on x86_64 and arm64.
 - NOT tested: the Zygisk module itself on a real Magisk phone (MuMu has its own root, no Zygisk).
+
+## v0.8.0 (2026-11-24) — MODS panel on UMG + MODS entry in the main menu
+- `umg.cpp`: runtime UMG toolkit. Widgets via `StaticConstructObject_Internal` (optional template = live
+  widget to copy its look; `Detach` then clears Slot/Slots/delegates so the copy doesn't share the
+  template's place or its OnClicked bindings), BlueprintCallable setters via ProcessEvent with
+  reflection-built params, overlay via `UWidget::TakeWidget` + `UShooterGameViewportClient::
+  AddViewportWidgetContent` (re-added after each map load; root object created with RootSet 1<<30,
+  verified against GEngine's FUObjectItem flags).
+- Main menu: `MainMenuUI_C` tree = ... VerticalBox `ButtonPanel` -> CanvasPanel `ExitPanel` -> Button
+  `ExitButton` -> ScaleBox -> TextBlock "EXIT". MODS entry = copies of those four (slots copied with
+  `CopySlot`), ButtonPanel's anchor span grown by 4/3 (it is anchor-stretched 0.03..0.33), and each frame
+  the copies mirror the originals' RenderTransform/RenderOpacity/Visibility (menu animations).
+  Live widgets vs. the class's template tree: template has the class (MainMenuUI_C) in its outer chain.
+- Clicks: inline hook on `UButton::SlateHandleClicked` (FReply returned via x8, passed through);
+  button -> action map; actions applied on the next tick, never inside Slate's click.
+- Findings: UMG `ScrollBox` created at runtime lays out content with no width (rows invisible) in this
+  build; ARK's `ScrollBoxAutoSize` (copied from the main menu's patch-notes `ScrollBoxAutoSize_0`)
+  works, content needs a SizeBox MinDesiredWidth. `EButtonTouchMethod` in 4.17 = {DownAndUp, PreciseTap}
+  (PreciseTap = 1). `SlateChildSize` lives in /Script/UMG. Copies of hidden style holders inherit
+  Collapsed -> set Visibility explicitly.
+- In-game MODS button moved to top centre (the right edge has ARK's notices); hidden while the panel
+  is open. Mods' on_draw/on_touch unchanged (HUD canvas / Slate hooks).
+- Verified on MuMu: entry under EXIT in menu style, slides away with the menu, panel opens in menu and
+  in game, mod ON/OFF (Hello Menu unload/load), toggles (FLY -> flying), saved to ini, swipe scroll
+  with 20+ rows, tap vs swipe, X closes, no crash.
+- NOT tested: returning from a game to the main menu (a new MainMenuUI instance gets its own entry by design).
+
+## v0.9.0 (2026-11-24) — mod windows + SETTINGS (API v3)
+- API v3 (appended to ArkModAPI): ui_window/label/button/check/number/set_text/show/visible,
+  config_range. Lua: `ark.window(title)` -> w:label/button/check/number/show/hide/toggle/visible/
+  set_title; controls :set_text, .on, .value; `ark.config(key, def, min, max, step)`.
+- ui.cpp: model (gWindows/gControls, ids, under gMu; any thread) vs. widgets (built in UiTick on the
+  game thread). Shared `BuildFrame` for the MODS panel and windows; lists always built first and
+  attached last (ScrollBoxAutoSize + SizeBox). One frame open at a time. Callbacks are called from
+  ApplyControl outside the lock; removed windows are taken off screen on the next tick
+  (RemoveFromParent). Windows are listed under their mod ("OPEN >").
+- SETTINGS: rows for mods whose ini has non-`toggle.` keys; the window is rebuilt from the ini on
+  each open (file order kept: Config.order), numbers via -/+ (declared range or step guessed from the
+  value), true/false|on/off|yes/no as checks, other text read-only. Writes via ConfigWrite.
+- Verified on MuMu: Lua window with label/button/check/number (callbacks, set_text, hide from Lua),
+  removing the mod while its window is open (window and row disappear, no crash), Cheat Menu SETTINGS
+  (C config_range: multiplier step 0.5) writes fly_speed/speed_multiplier to the ini, Hello Menu text
+  setting read-only.
+- SDK dump (`sdk.cpp`; panel row "DUMP SDK", Lua `ark.dump_sdk([filter])`): classes/structs/enums
+  sorted by path, fields with type/offset/size, functions with params and flags. Layouts verified in
+  disasm: UEnum Names TArray<{FName,int64}> at 0x40 (GetNameByIndex), UFunction::FunctionFlags at 0x88
+  (ProcessEvent tests bit 0x400), MapProperty ValueProp at 0x80, EnumProperty/ClassProperty second
+  pointer at 0x80. Main menu: 3016 classes (1026 *_C), 1356 structs, 670 enums, 3.6 MB; cross-checked
+  TextBlock.Text 0x1b0, CurrentStatusValues[12] @0x960, EButtonTouchMethod {DownAndUp, PreciseTap}.
+- API v3 objects: `events.cpp` registers an FUObjectArray create listener (vtable {~D1,~D0,
+  NotifyUObjectCreated}; CDOs/archetypes skipped; matching ones queued, delivered next tick if the
+  slot still holds the same object). C on_new_object/load_object/spawn_actor; Lua ark.on_new_object,
+  ark.load (StaticLoadObject with UObject class), ark.spawn (GameplayStatics BeginDeferred... +
+  FinishSpawningActor, collision AdjustIfPossibleButAlwaysSpawn), ark.delay/every/cancel (per-script
+  tick), TArray element get/set + whole-array assignment for plain element types (FMemory::Realloc).
+- Verified in game: timers (every x3 + cancel), HiddenActors 0 -> 2 -> 0 with element check, Dodo
+  spawned next to the player and reported by on_new_object. Timers are frame-driven (first delay fired
+  after 7 s because the game stalls while starting).
+- Config writing: Lua `ark.save_config(key, value)`, C `config_set` (both via ConfigWrite).
+- New Lua mods (items 8-10 of the plan), written from the SDK dump: `mods/spawner` (PrimalDinoCharacter
+  .SpawnDino with base level, fallback ark.spawn; PrimalItem.AddNewItem resources into
+  MyInventoryComponent), `mods/teleport` (3 points in teleport.ini, K2_TeleportTo, "up 1000"),
+  `mods/rates` (ShooterGameMode *Multiplier fields x user factor, originals restored on shutdown).
+  STATUS: they load without errors on MuMu, but have NOT been tried in game yet. Dino paths other
+  than Carno/Ptero/Direbear/Galli/... are guessed from the PC layout (the mod reports "not in this
+  version" if ark.load fails). Rates: unverified whether every field is read live by the game.
+  TODO: make_dist.sh / make_magisk.sh still bundle only lua_example.lua; add these mods + docs.
+
+## v0.9.0 continued (2026-11-24) — bundled mods verified, Russian UI
+- Spawner verified in game: all 12 dino + 13 resource paths load; SpawnDino's level parameters are
+  ignored on mobile (always level 1) -> PrimalCharacterStatusComponent.SetBaseLevel(lvl, false) after
+  spawning (Raptor level 30: HP 320/320 shown by the game; Trike 375 -> 900 HP). AddNewItem gave
+  100 Metal Ingot / Cementing Paste into the inventory.
+- Teleport verified: K2_TeleportTo moves the player (+3000 X confirmed), points saved in teleport.ini.
+- Rates verified on XP: AddExperience(100, generic) gave +200 at x1 and +400 at x2 -> the game reads
+  ShooterGameMode.XPMultiplier live. Other fields not individually measured.
+- Finding: tapping the respawn screen's button through the MODS button area once ended the game with
+  System.exit(0) (clean exit, not a crash; cause not identified). The in-game MODS button is now hidden
+  while the player has no pawn (death/respawn screens); respawn after that worked normally.
+- i18n.cpp: UI language from ArkMods/loader.ini `language = auto|en|ru` (auto = persist.sys.locale),
+  Russian strings for the panel/SETTINGS/SDK rows; Lua `ark.lang()`. Cyrillic renders in the game font
+  but is wider than Slate measures -> state column is a fixed-width SizeBox, text left-aligned.
+  Spawner/Teleport/Rates are bilingual. `ark.save_config` / C `config_set` write ini values.
+- make_dist.sh / make_magisk.sh bundle lua_example, spawner, teleport, rates.
+- CI: `.github/workflows/build.yml` (ubuntu, nttld/setup-ndk r27c): build, make_dist + make_magisk,
+  artifacts; tag v* = release (tag must equal kVersion). Packaging no longer needs PowerShell:
+  `tools/zipdir.py` (forward slashes, 755 for scripts, CRLF check); scripts pick the first python that
+  runs (skips the Windows Store stub). NOT run on GitHub yet (nothing pushed).
+- Templates: mods/template/my_mod.lua (verified: MaxWalkSpeed 492.8 -> 1200 via the MY FEATURE row,
+  restored on unload) and my_mod.cpp (builds with the one-line clang++ from QUICKSTART, loads, init 0).
+  mods/QUICKSTART.md = "first mod in 5 minutes".

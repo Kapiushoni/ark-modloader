@@ -2,8 +2,10 @@
 
 #include <dlfcn.h>
 
+#include <cmath>
 #include <cstring>
 
+#include "dispatch.h"
 #include "elfsym.h"
 #include "log.h"
 
@@ -32,6 +34,8 @@ struct FStringRet {
 FStringRet (*gConsoleCommand)(UObject*, const FString&, bool) = nullptr;
 
 TNameEntryArray* Names() { return gGetNames ? gGetNames() : nullptr; }
+void* (*gRealloc)(void*, uint64_t, uint32_t) = nullptr;
+UObject* (*gStaticLoadObject)(UObject*, UObject*, const TCHAR*, const TCHAR*, uint32_t, void*, bool) = nullptr;
 
 }  // namespace
 
@@ -62,6 +66,9 @@ bool Init(void* lib, const elfsym::Image* image) {
     ok &= Resolve(gMemFree, "_ZN7FMemory4FreeEPv");
     ok &= Resolve(gNameCtor, "_ZN5FNameC1EPKw9EFindName");
     ok &= Resolve(gConsoleCommand, "_ZN17APlayerController14ConsoleCommandERK7FStringb");
+    // Optional (features that need them report an error instead).
+    gRealloc = reinterpret_cast<decltype(gRealloc)>(Sym("_ZN7FMemory7ReallocEPvyj"));
+    gStaticLoadObject = reinterpret_cast<decltype(gStaticLoadObject)>(Sym("_Z16StaticLoadObjectP6UClassP7UObjectPKwS4_jP11UPackageMapb"));
     return ok;
 }
 
@@ -245,6 +252,56 @@ bool ExecCommand(const char* cmd) {
     FStringRet r = gConsoleCommand(pc, f, true);
     if (r.s.Data) gMemFree(r.s.Data);
     return true;
+}
+
+}  // namespace engine
+
+namespace engine {
+
+void* Realloc(void* p, size_t size) { return gRealloc ? gRealloc(p, size, 0) : nullptr; }
+
+UObject* LoadObject(const char* path) {
+    static UObject* objectClass = FindObject("/Script/CoreUObject.Object");
+    if (UObject* o = FindObject(path)) return o;  // already loaded
+    if (!gStaticLoadObject || !objectClass) return nullptr;
+    std::wstring w = FromUtf8(path);
+    return gStaticLoadObject(objectClass, nullptr, w.c_str(), nullptr, 0, nullptr, true);
+}
+
+// GameplayStatics.BeginDeferredActorSpawnFromClass + FinishSpawningActor through reflection
+// (static UFunctions, called on the class default object).
+UObject* SpawnActor(UObject* cls, float x, float y, float z, float yawDeg) {
+    static UObject* statics = FindObject("/Script/Engine.Default__GameplayStatics");
+    static UObject* begin = statics ? FindField(statics, "BeginDeferredActorSpawnFromClass") : nullptr;
+    static UObject* finish = statics ? FindField(statics, "FinishSpawningActor") : nullptr;
+    static UObject* transform = FindObject("/Script/CoreUObject.Transform");
+    static UObject* actorClass = FindObject("/Script/Engine.Actor");
+    if (!begin || !finish || !transform || !cls || !IsA(cls, FindObject("/Script/CoreUObject.Class"))) return nullptr;
+    bool isActor = false;
+    for (UObject* c = cls; c && !isActor; c = At<UObject*>(c, kStruct_Super)) isActor = c == actorClass;
+    if (!isActor || !World() || ParamsSize(begin) > 256 || ParamsSize(finish) > 256) return nullptr;
+
+    alignas(16) uint8_t xf[96] = {};  // FTransform: quat rotation, translation, scale
+    float half = yawDeg * 3.14159265f / 360.f;
+    float quat[4] = {0, 0, std::sin(half), std::cos(half)}, pos[3] = {x, y, z}, scale[3] = {1, 1, 1};
+    std::memcpy(xf + PropertyOffset(transform, "Rotation"), quat, sizeof quat);
+    std::memcpy(xf + PropertyOffset(transform, "Translation"), pos, sizeof pos);
+    std::memcpy(xf + PropertyOffset(transform, "Scale3D"), scale, sizeof scale);
+
+    alignas(16) uint8_t p[256] = {};
+    At<UObject*>(p, PropertyOffset(begin, "WorldContextObject")) = World();
+    At<UObject*>(p, PropertyOffset(begin, "ActorClass")) = cls;
+    std::memcpy(p + PropertyOffset(begin, "SpawnTransform"), xf, At<int32_t>(transform, kStruct_PropsSize));
+    At<uint8_t>(p, PropertyOffset(begin, "CollisionHandlingOverride")) = 2;  // AdjustIfPossibleButAlwaysSpawn
+    dispatch::CallOriginal(statics, begin, p);
+    UObject* actor = At<UObject*>(p, PropertyOffset(begin, "ReturnValue"));
+    if (!actor) return nullptr;
+
+    alignas(16) uint8_t q[256] = {};
+    At<UObject*>(q, PropertyOffset(finish, "Actor")) = actor;
+    std::memcpy(q + PropertyOffset(finish, "SpawnTransform"), xf, At<int32_t>(transform, kStruct_PropsSize));
+    dispatch::CallOriginal(statics, finish, q);
+    return At<UObject*>(q, PropertyOffset(finish, "ReturnValue")) ? At<UObject*>(q, PropertyOffset(finish, "ReturnValue")) : actor;
 }
 
 }  // namespace engine

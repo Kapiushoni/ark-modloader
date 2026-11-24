@@ -12,6 +12,8 @@
 
 #include "dispatch.h"
 #include "elfsym.h"
+#include "events.h"
+#include "i18n.h"
 #include "engine.h"
 #include "log.h"
 #include "mods.h"
@@ -19,7 +21,7 @@
 
 namespace {
 
-constexpr const char* kVersion = "0.7.0";
+constexpr const char* kVersion = "0.9.0";
 
 std::string PackageName() {
     char buf[256] = {};
@@ -121,6 +123,7 @@ void* LoaderThread(void*) {
     logx::OpenFile((modsDir + "/loader.log").c_str());
     LOG("ArkModLoader %s | pkg %s | mods dir %s", kVersion, pkg.c_str(), modsDir.c_str());
     SeedBundledMods("/data/data/" + pkg + "/files/arkml_bundle", modsDir);
+    i18n::Init(modsDir);
 
     while (!engine::Ready() || !engine::World()) usleep(250 * 1000);
     LOG("engine ready: %d objects, world %s", engine::Objects()->ObjObjects.NumElements,
@@ -128,6 +131,7 @@ void* LoaderThread(void*) {
     SelfTest();
 
     if (!ui::Init()) LOGE("in-game MODS panel unavailable (mods still load)");
+    if (!events::Init()) LOGE("object creation events unavailable");
     mods::Setup(modsDir, "/data/data/" + pkg + "/files/arkmods_cache");
     LOG("watching %s (new, changed and removed mods are applied live)", modsDir.c_str());
 

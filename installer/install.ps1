@@ -258,5 +258,5 @@ if (-not $ok) {
 foreach ($l in ($log -split "`n")) {
     if ($l -match "ArkModLoader \d|loaded (lua )?mod|ERROR") { Say ("  " + ($l -replace "^.*ArkModLoader: ", "")) }
 }
-Say "`nГотово! В игре (одиночный режим) справа вверху появится кнопка MODS." "Green"
+Say "`nГотово! В главном меню под EXIT появится пункт MODS, в игре — кнопка MODS сверху по центру." "Green"
 Say "Моды и их настройки: $ModsDir   (лог: loader.log)"

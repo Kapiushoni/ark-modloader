@@ -48,4 +48,8 @@ FText MakeText(const char* utf8);
 std::string TextToUtf8(const FText& t);
 bool ExecCommand(const char* cmd);
 
+void* Realloc(void* p, size_t size);       // FMemory (engine heap: TArray data etc.)
+UObject* LoadObject(const char* path);     // find, or load from the game's packages (game thread)
+UObject* SpawnActor(UObject* cls, float x, float y, float z, float yawDeg);  // game thread
+
 }  // namespace engine

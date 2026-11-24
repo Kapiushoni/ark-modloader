@@ -9,6 +9,7 @@
 namespace mods {
 
 void Setup(const std::string& modsDir, const std::string& cacheDir);
+const std::string& Dir();  // the ArkMods folder
 
 // Loader thread: compare the folder with the registry and queue loads/reloads/unloads
 // (they run on the game thread).
@@ -21,5 +22,9 @@ std::vector<ui::ModRow> PanelRows();
 // Panel toggles are remembered per mod as "toggle.<label> = 0/1" in ArkMods/<mod>.ini.
 void RestoreToggle(const void* owner, const std::string& label, int* value);
 void SaveToggle(const void* owner, const std::string& label, int value);
+
+// The mod's settings in file order (remembered toggles left out) and writing one back.
+std::vector<ui::Setting> Settings(const void* owner);
+void SaveSetting(const void* owner, const std::string& key, const std::string& value);
 
 }  // namespace mods

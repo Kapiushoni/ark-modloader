@@ -32,7 +32,7 @@
 extern "C" {
 #endif
 
-#define ARKMOD_API_VERSION 2
+#define ARKMOD_API_VERSION 3
 
 typedef struct UObject UObject;
 
@@ -51,6 +51,13 @@ typedef void (*ArkDrawFn)(void* user, float screen_w, float screen_h);
 /* phase: 0 = down, 1 = move, 2 = up. Return 1 on "down" to take the touch: its move/up
    events then come to you and the game never sees it. */
 typedef int  (*ArkTouchFn)(void* user, int phase, int finger, float x, float y);
+
+/* v3 windows: a button was tapped / a check or number was changed by the user
+   (value = 0/1 for a check). Called on the game thread. */
+typedef void (*ArkUiFn)(void* user);
+typedef void (*ArkUiChangedFn)(void* user, float value);
+/* v3: an object of a watched class was created (called on the game thread the frame after). */
+typedef void (*ArkObjectFn)(void* user, UObject* obj);
 
 /* FText as laid out by UE 4.17 (opaque, 24 bytes). */
 typedef struct ArkText { void* data; void* ref; uint32_t flags; uint32_t pad; } ArkText;
@@ -103,6 +110,39 @@ typedef struct ArkModAPI {
     void     (*draw_rect)(float x, float y, float w, float h, float r, float g, float b, float a);
     void     (*draw_text)(const char* ascii, float x, float y, float scale, float r, float g, float b);
     void     (*on_touch)(ArkTouchFn fn, void* user);
+
+    /* ---- v3 (check api->version >= 3) ---- */
+
+    /* Windows made of the game's own UI widgets, in the style of the MODS panel. A window is
+       listed under your mod in the MODS panel ("OPEN >") and can be shown from code too; only
+       one window (or the panel) is open at a time. Controls appear in the order added.
+       Ids are > 0 (0 = failure); the window and its controls go away when the mod unloads.
+       The values behind checks and numbers are yours: the window shows changes you make. */
+    int      (*ui_window)(const char* title);
+    int      (*ui_label)(int window, const char* text);
+    int      (*ui_button)(int window, const char* text, ArkUiFn fn, void* user);
+    int      (*ui_check)(int window, const char* label, int* value, ArkUiChangedFn fn, void* user);
+    int      (*ui_number)(int window, const char* label, float* value, float min, float max, float step,
+                          ArkUiChangedFn fn, void* user);       /* shown as  label   -  value  +  */
+    void     (*ui_set_text)(int id, const char* text);          /* control text or window title */
+    void     (*ui_show)(int window, int show);                  /* 1 show, 0 hide, -1 toggle */
+    int      (*ui_visible)(int window);
+
+    /* Range and step the SETTINGS window offers for a numeric setting of your ini (without
+       it the loader guesses from the value). Every mod with settings gets a "SETTINGS >"
+       row in the MODS panel: numbers with -/+, true/false (on/off, yes/no) as ON/OFF. */
+    void     (*config_range)(const char* key, float min, float max, float step);
+
+    /* Objects (game thread). on_new_object: fn(user, obj) for every new instance of `cls` (or a
+       subclass), the frame after it was created. load_object: find, or load from the game's
+       packages ("/Game/.../Dodo_Character_BP.Dodo_Character_BP_C"). spawn_actor: spawn an actor of
+       class `cls` at a world position (yaw in degrees); NULL on failure. */
+    void     (*on_new_object)(UObject* cls, ArkObjectFn fn, void* user);
+    UObject* (*load_object)(const char* path);
+    UObject* (*spawn_actor)(UObject* cls, float x, float y, float z, float yaw);
+
+    /* Writes key = value into your ini (other lines and comments are kept). */
+    void     (*config_set)(const char* key, const char* value);
 } ArkModAPI;
 
 #ifdef __cplusplus

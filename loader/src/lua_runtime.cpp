@@ -10,8 +10,11 @@
 
 #include "dispatch.h"
 #include "engine.h"
+#include "events.h"
+#include "i18n.h"
 #include "log.h"
 #include "lua.hpp"
+#include "sdk.h"
 #include "ui.h"
 
 namespace luart {
@@ -36,7 +39,12 @@ struct Script {
     bool dead = false;  // set on unload; the shell is kept so late callbacks can bail out safely
     int errors = 0;
     std::vector<std::unique_ptr<Callback>> callbacks;
-    std::vector<std::unique_ptr<int>> toggles;
+    std::vector<std::unique_ptr<int>> toggles;   // ark.toggle and window checks
+    std::vector<std::unique_ptr<float>> numbers; // window numbers
+    struct Timer { int id; double due, every; Callback* cb; bool dead; };
+    std::vector<Timer> timers;
+    int nextTimer = 1;
+    bool timerTick = false;  // the per-script tick that runs timers is registered
 };
 
 namespace {
@@ -107,6 +115,11 @@ UObj* FindProp(UObj* strctOrObj, const char* name) {
 const char* kObjMT = "ark.Object";
 const char* kStructMT = "ark.Struct";
 const char* kToggleMT = "ark.Toggle";
+const char* kWindowMT = "ark.Window";
+const char* kControlMT = "ark.Control";
+
+struct WindowBox { int id; };
+struct ControlBox { int id; int* check; float* number; };
 
 struct ObjBox {
     UObj* p;
@@ -274,6 +287,53 @@ void WriteValue(lua_State* L, int vi, UObj* prop, uint8_t* addr, std::deque<std:
     }
 }
 
+// Element types without owned memory: a TArray of them can be resized from Lua safely.
+bool IsPlain(UObj* p, int depth = 0) {
+    const std::string t = engine::TypeOf(p);
+    if (t == "StructProperty") {
+        if (depth > 8) return false;
+        for (UObj* s = Extra(p); s; s = At<UObj*>(s, ue4::kStruct_Super))
+            for (UObj* f = Children(s); f; f = Next(f))
+                if (engine::IsProperty(f) && !IsPlain(f, depth + 1)) return false;
+        return true;
+    }
+    static const char* kPlain[] = {"FloatProperty", "DoubleProperty", "IntProperty", "Int8Property", "Int16Property",
+                                   "Int64Property", "UInt16Property", "UInt32Property", "UInt64Property", "ByteProperty",
+                                   "EnumProperty", "BoolProperty", "ObjectProperty", "ClassProperty",
+                                   "WeakObjectProperty", "NameProperty"};
+    for (const char* k : kPlain) if (t == k) return true;
+    return false;
+}
+
+using ByteArray = ue4::TArray<uint8_t>;
+
+uint8_t* ArrayElem(lua_State* L, ByteArray* arr, UObj* inner, lua_Integer idx) {
+    if (idx < 0 || idx >= arr->Num) luaL_error(L, "index %d out of range (0..%d)", int(idx), arr->Num - 1);
+    return arr->Data + idx * ElemSize(inner);
+}
+
+// t = {v1, v2, ...} (1-based, as reads return it) replaces the whole array.
+void ResizeAndFill(lua_State* L, ByteArray* arr, UObj* prop, int valArg) {
+    UObj* inner = Extra(prop);
+    if (!inner || !IsPlain(inner))
+        luaL_error(L, "an array of %s can only be changed element by element: obj:set(name, value, index)",
+                   inner ? engine::TypeOf(inner).c_str() : "?");
+    int n = int(lua_rawlen(L, valArg)), esz = ElemSize(inner);
+    if (n > arr->Max) {
+        void* data = engine::Realloc(arr->Data, size_t(n) * esz);
+        if (!data) luaL_error(L, "out of memory");
+        arr->Data = static_cast<uint8_t*>(data);
+        arr->Max = n;
+    }
+    if (n > arr->Num) std::memset(arr->Data + size_t(arr->Num) * esz, 0, size_t(n - arr->Num) * esz);
+    arr->Num = n;
+    for (int i = 0; i < n; ++i) {
+        lua_rawgeti(L, valArg, i + 1);
+        WriteValue(L, -1, inner, arr->Data + size_t(i) * esz, nullptr);
+        lua_pop(L, 1);
+    }
+}
+
 // Address of element `idx` of property `prop` inside `base`.
 uint8_t* PropAddr(lua_State* L, uint8_t* base, UObj* prop, lua_Integer idx) {
     if (idx < 0 || idx >= ArrayDim(prop)) luaL_error(L, "index %d out of range (0..%d)", int(idx), ArrayDim(prop) - 1);
@@ -282,6 +342,11 @@ uint8_t* PropAddr(lua_State* L, uint8_t* base, UObj* prop, lua_Integer idx) {
 
 // Pushes property value; static arrays without an index come back as a table (copy).
 void GetProp(lua_State* L, uint8_t* base, UObj* prop, const ObjBox& owner, int idxArg) {
+    if (!lua_isnoneornil(L, idxArg) && engine::TypeOf(prop) == "ArrayProperty") {  // TArray element (0-based)
+        auto* arr = reinterpret_cast<ByteArray*>(base + Offset(prop));
+        PushValue(L, Extra(prop), ArrayElem(L, arr, Extra(prop), luaL_checkinteger(L, idxArg)), owner, true);
+        return;
+    }
     if (ArrayDim(prop) > 1 && lua_isnoneornil(L, idxArg)) {
         lua_createtable(L, ArrayDim(prop), 0);
         for (int i = 0; i < ArrayDim(prop); ++i) {
@@ -294,6 +359,16 @@ void GetProp(lua_State* L, uint8_t* base, UObj* prop, const ObjBox& owner, int i
 }
 
 void SetProp(lua_State* L, uint8_t* base, UObj* prop, int valArg, int idxArg) {
+    if (engine::TypeOf(prop) == "ArrayProperty") {
+        auto* arr = reinterpret_cast<ByteArray*>(base + Offset(prop));
+        if (lua_isnoneornil(L, idxArg)) {
+            luaL_checktype(L, valArg, LUA_TTABLE);
+            ResizeAndFill(L, arr, prop, valArg);
+        } else {
+            WriteValue(L, valArg, Extra(prop), ArrayElem(L, arr, Extra(prop), luaL_checkinteger(L, idxArg)), nullptr);
+        }
+        return;
+    }
     if (ArrayDim(prop) > 1 && lua_isnoneornil(L, idxArg) && lua_istable(L, valArg)) {
         for (int i = 0; i < ArrayDim(prop); ++i) {
             lua_rawgeti(L, valArg, i);
@@ -484,6 +559,115 @@ int ToggleNewIndex(lua_State* L) {
     return 0;
 }
 
+// ------------------------------------------------------------------ ark.window
+// w = ark.window(title); w:label(text) / w:button(text, fn) / w:check(label, on, fn) /
+// w:number(label, min, max, step, value, fn) -> control; w:show() / hide() / toggle() / visible() / set_title(t)
+// control:set_text(t); check control .on, number control .value (read/write).
+void ClickTramp(void* u) {
+    auto* c = static_cast<Callback*>(u);
+    if (c->s->dead || !dispatch::OnGameThread()) return;
+    lua_rawgeti(c->s->L, LUA_REGISTRYINDEX, c->ref);
+    PCall(c->s, 0, 0);
+}
+void CheckTramp(void* u, float v) {
+    auto* c = static_cast<Callback*>(u);
+    if (c->s->dead || !dispatch::OnGameThread()) return;
+    lua_rawgeti(c->s->L, LUA_REGISTRYINDEX, c->ref);
+    lua_pushboolean(c->s->L, v != 0);
+    PCall(c->s, 1, 0);
+}
+void NumberTramp(void* u, float v) {
+    auto* c = static_cast<Callback*>(u);
+    if (c->s->dead || !dispatch::OnGameThread()) return;
+    lua_rawgeti(c->s->L, LUA_REGISTRYINDEX, c->ref);
+    lua_pushnumber(c->s->L, v);
+    PCall(c->s, 1, 0);
+}
+
+Callback* NewCallback(lua_State* L, int fnArg);
+
+void* OptCallback(lua_State* L, int arg) { return lua_isnoneornil(L, arg) ? nullptr : NewCallback(L, arg); }
+
+int PushControl(lua_State* L, int id, int* check, float* number) {
+    if (!id) return luaL_error(L, "window control could not be created (window gone?)");
+    auto* b = static_cast<ControlBox*>(lua_newuserdatauv(L, sizeof(ControlBox), 0));
+    *b = ControlBox{id, check, number};
+    luaL_setmetatable(L, kControlMT);
+    return 1;
+}
+
+int WinId(lua_State* L) { return static_cast<WindowBox*>(luaL_checkudata(L, 1, kWindowMT))->id; }
+
+int WinLabel(lua_State* L) { return PushControl(L, ui::AddLabel(WinId(L), luaL_checkstring(L, 2)), nullptr, nullptr); }
+int WinButton(lua_State* L) {
+    int w = WinId(L);
+    const char* text = luaL_checkstring(L, 2);
+    void* cb = OptCallback(L, 3);
+    return PushControl(L, ui::AddButton(w, text, cb ? ClickTramp : nullptr, cb), nullptr, nullptr);
+}
+int WinCheck(lua_State* L) {
+    int w = WinId(L);
+    const char* label = luaL_checkstring(L, 2);
+    Script* s = Self(L);
+    s->toggles.push_back(std::make_unique<int>(lua_toboolean(L, 3) ? 1 : 0));
+    int* v = s->toggles.back().get();
+    void* cb = OptCallback(L, 4);
+    return PushControl(L, ui::AddCheck(w, label, v, cb ? CheckTramp : nullptr, cb), v, nullptr);
+}
+int WinNumber(lua_State* L) {
+    int w = WinId(L);
+    const char* label = luaL_checkstring(L, 2);
+    float mn = float(luaL_checknumber(L, 3)), mx = float(luaL_checknumber(L, 4));
+    float step = float(luaL_optnumber(L, 5, 1));
+    float value = float(luaL_optnumber(L, 6, mn));
+    if (mx < mn) return luaL_error(L, "number: max < min");
+    Script* s = Self(L);
+    s->numbers.push_back(std::make_unique<float>(std::min(std::max(value, mn), mx)));
+    float* v = s->numbers.back().get();
+    void* cb = OptCallback(L, 7);
+    return PushControl(L, ui::AddNumber(w, label, v, mn, mx, step, cb ? NumberTramp : nullptr, cb), nullptr, v);
+}
+int WinShow(lua_State* L) { ui::ShowWindow(WinId(L), 1); return 0; }
+int WinHide(lua_State* L) { ui::ShowWindow(WinId(L), 0); return 0; }
+int WinToggle(lua_State* L) { ui::ShowWindow(WinId(L), -1); return 0; }
+int WinVisible(lua_State* L) { lua_pushboolean(L, ui::WindowVisible(WinId(L))); return 1; }
+int WinSetTitle(lua_State* L) { ui::SetText(WinId(L), luaL_checkstring(L, 2)); return 0; }
+
+const luaL_Reg kWindowMethods[] = {
+    {"label", WinLabel}, {"button", WinButton}, {"check", WinCheck}, {"number", WinNumber},
+    {"show", WinShow}, {"hide", WinHide}, {"toggle", WinToggle}, {"visible", WinVisible},
+    {"set_title", WinSetTitle}, {nullptr, nullptr}};
+
+int ArkWindow(lua_State* L) {
+    int id = ui::NewWindow(luaL_checkstring(L, 1), Self(L));
+    static_cast<WindowBox*>(lua_newuserdatauv(L, sizeof(WindowBox), 0))->id = id;
+    luaL_setmetatable(L, kWindowMT);
+    return 1;
+}
+
+int CtlSetText(lua_State* L) {
+    ui::SetText(static_cast<ControlBox*>(luaL_checkudata(L, 1, kControlMT))->id, luaL_checkstring(L, 2));
+    return 0;
+}
+int ControlIndex(lua_State* L) {
+    auto* b = static_cast<ControlBox*>(luaL_checkudata(L, 1, kControlMT));
+    const char* k = luaL_checkstring(L, 2);
+    if (!strcmp(k, "on") && b->check) lua_pushboolean(L, *b->check != 0);
+    else if (!strcmp(k, "value") && b->number) lua_pushnumber(L, *b->number);
+    else if (!strcmp(k, "set_text")) lua_pushcfunction(L, CtlSetText);
+    else if (!strcmp(k, "id")) lua_pushinteger(L, b->id);
+    else lua_pushnil(L);
+    return 1;
+}
+int ControlNewIndex(lua_State* L) {
+    auto* b = static_cast<ControlBox*>(luaL_checkudata(L, 1, kControlMT));
+    const char* k = luaL_checkstring(L, 2);
+    if (!strcmp(k, "on") && b->check) *b->check = lua_toboolean(L, 3) ? 1 : 0;
+    else if (!strcmp(k, "value") && b->number) *b->number = float(luaL_checknumber(L, 3));
+    else return luaL_error(L, "control has no writable field '%s'", k);
+    return 0;
+}
+
 // ------------------------------------------------------------------ trampolines (game thread)
 void TickTramp(void* u) {
     auto* c = static_cast<Callback*>(u);
@@ -567,6 +751,8 @@ int ArkConfig(lua_State* L) {
     std::string def = t == LUA_TBOOLEAN ? (lua_toboolean(L, 2) ? "true" : "false")
                     : t == LUA_TNONE || t == LUA_TNIL ? "" : luaL_tolstring(L, 2, nullptr);
     std::string v = s->host.config(key, def);
+    if (t == LUA_TNUMBER && lua_isnumber(L, 3) && lua_isnumber(L, 4) && s->host.range)  // ark.config(key, def, min, max [, step])
+        s->host.range(key, float(lua_tonumber(L, 3)), float(lua_tonumber(L, 4)), float(luaL_optnumber(L, 5, 0)));
     if (t == LUA_TNUMBER) {
         lua_settop(L, 2);
         if (lua_stringtonumber(L, v.c_str()) == 0) lua_pushvalue(L, 2);
@@ -576,6 +762,14 @@ int ArkConfig(lua_State* L) {
         lua_pushstring(L, v.c_str());
     }
     return 1;
+}
+// ark.save_config(key, value): write a setting (numbers, booleans and strings).
+int ArkSaveConfig(lua_State* L) {
+    Script* s = Self(L);
+    const char* key = luaL_checkstring(L, 1);
+    std::string v = lua_isboolean(L, 2) ? (lua_toboolean(L, 2) ? "true" : "false") : luaL_tolstring(L, 2, nullptr);
+    if (s->host.save) s->host.save(key, v);
+    return 0;
 }
 int ArkToggle(lua_State* L) {
     Script* s = Self(L);
@@ -642,13 +836,90 @@ int ArkObjects(lua_State* L) {
     return 1;
 }
 int ArkTime(lua_State* L) { lua_pushnumber(L, Now()); return 1; }
+int ArkLang(lua_State* L) { lua_pushstring(L, i18n::Lang().c_str()); return 1; }  // "en" / "ru"
+// ---- timers: ark.delay(sec, fn) / ark.every(sec, fn) -> id; ark.cancel(id)
+void TimerTick(void* u) {
+    Script* s = static_cast<Script*>(u);
+    if (s->dead) return;
+    double now = Now();
+    size_t n = s->timers.size();  // timers added by callbacks start next frame
+    for (size_t i = 0; i < n && !s->dead; ++i) {
+        Script::Timer t = s->timers[i];  // copy: callbacks may add timers (the vector can move)
+        if (t.dead || now < t.due) continue;
+        if (t.every > 0) s->timers[i].due = std::max(t.due + t.every, now);
+        else s->timers[i].dead = true;
+        lua_rawgeti(s->L, LUA_REGISTRYINDEX, t.cb->ref);
+        PCall(s, 0, 0);
+    }
+    if (!s->dead)
+        s->timers.erase(std::remove_if(s->timers.begin(), s->timers.end(), [](const Script::Timer& t) { return t.dead; }),
+                        s->timers.end());
+}
+int AddTimer(lua_State* L, bool repeat) {
+    Script* s = Self(L);
+    double sec = luaL_checknumber(L, 1);
+    if (repeat && sec <= 0) return luaL_error(L, "ark.every needs an interval > 0");
+    Callback* c = NewCallback(L, 2);
+    int id = s->nextTimer++;
+    s->timers.push_back({id, Now() + std::max(sec, 0.0), repeat ? sec : 0, c, false});
+    if (!s->timerTick) { dispatch::AddTick(TimerTick, s, s); s->timerTick = true; }
+    lua_pushinteger(L, id);
+    return 1;
+}
+int ArkDelay(lua_State* L) { return AddTimer(L, false); }
+int ArkEvery(lua_State* L) { return AddTimer(L, true); }
+int ArkCancel(lua_State* L) {
+    lua_Integer id = luaL_checkinteger(L, 1);
+    for (auto& t : Self(L)->timers) if (t.id == id) t.dead = true;
+    return 0;
+}
+
+// ---- ark.on_new_object(classOrPath, fn): fn(obj) the frame after an object of that class is created
+void NewObjTramp(void* u, UObj* obj) {
+    auto* c = static_cast<Callback*>(u);
+    if (c->s->dead) return;
+    lua_rawgeti(c->s->L, LUA_REGISTRYINDEX, c->ref);
+    PushObj(c->s->L, obj);
+    PCall(c->s, 1, 0);
+}
+int ArkOnNewObject(lua_State* L) {
+    UObj* cls = OptObjOrPath(L, 1);
+    if (!cls) return luaL_error(L, "ark.on_new_object: class not found");
+    events::OnNewObject(cls, NewObjTramp, NewCallback(L, 2), Self(L));
+    return 0;
+}
+
+// ---- ark.load(path) -> object (loads it from the game's packages if needed)
+int ArkLoad(lua_State* L) { PushObj(L, engine::LoadObject(luaL_checkstring(L, 1))); return 1; }
+
+// ---- ark.spawn(classOrPath, x, y, z [, yaw]) -> actor or nil
+int ArkSpawn(lua_State* L) {
+    UObj* cls = lua_type(L, 1) == LUA_TSTRING ? engine::LoadObject(lua_tostring(L, 1)) : CheckObj(L, 1);
+    if (!cls) return luaL_error(L, "ark.spawn: class not found");
+    PushObj(L, engine::SpawnActor(cls, float(luaL_checknumber(L, 2)), float(luaL_checknumber(L, 3)),
+                                  float(luaL_checknumber(L, 4)), float(luaL_optnumber(L, 5, 0))));
+    return 1;
+}
+
+// ark.dump_sdk([filter]) -> path, classes, structs, enums  (or nil, error)
+int ArkDumpSdk(lua_State* L) {
+    sdk::Result r = sdk::Dump(Self(L)->host.modsDir + "/sdk", luaL_optstring(L, 1, ""));
+    if (!r.ok) { lua_pushnil(L); lua_pushstring(L, r.error.c_str()); return 2; }
+    lua_pushstring(L, r.path.c_str());
+    lua_pushinteger(L, r.classes);
+    lua_pushinteger(L, r.structs);
+    lua_pushinteger(L, r.enums);
+    return 4;
+}
 
 const luaL_Reg kArk[] = {
-    {"log", ArkLog}, {"config", ArkConfig}, {"toggle", ArkToggle},
+    {"log", ArkLog}, {"config", ArkConfig}, {"save_config", ArkSaveConfig}, {"toggle", ArkToggle},
     {"on_tick", ArkOnTick}, {"on_draw", ArkOnDraw}, {"on_touch", ArkOnTouch}, {"hook", ArkHook},
     {"draw_rect", ArkDrawRect}, {"draw_text", ArkDrawText},
     {"find", ArkFind}, {"world", ArkWorld}, {"world_name", ArkWorldName},
     {"controller", ArkController}, {"player", ArkPlayer}, {"objects", ArkObjects}, {"time", ArkTime},
+    {"window", ArkWindow}, {"dump_sdk", ArkDumpSdk}, {"delay", ArkDelay}, {"every", ArkEvery},
+    {"cancel", ArkCancel}, {"on_new_object", ArkOnNewObject}, {"load", ArkLoad}, {"spawn", ArkSpawn}, {"lang", ArkLang},
     {nullptr, nullptr}};
 
 void SetupState(lua_State* L, const Host& host) {
@@ -670,6 +941,16 @@ void SetupState(lua_State* L, const Host& host) {
     luaL_newmetatable(L, kToggleMT);
     lua_pushcfunction(L, ToggleIndex); lua_setfield(L, -2, "__index");
     lua_pushcfunction(L, ToggleNewIndex); lua_setfield(L, -2, "__newindex");
+    lua_pop(L, 1);
+
+    luaL_newmetatable(L, kWindowMT);
+    luaL_newlib(L, kWindowMethods);
+    lua_setfield(L, -2, "__index");
+    lua_pop(L, 1);
+
+    luaL_newmetatable(L, kControlMT);
+    lua_pushcfunction(L, ControlIndex); lua_setfield(L, -2, "__index");
+    lua_pushcfunction(L, ControlNewIndex); lua_setfield(L, -2, "__newindex");
     lua_pop(L, 1);
 
     luaL_newlib(L, kArk);
@@ -717,6 +998,7 @@ void Unload(Script* s) {
     else lua_pop(s->L, 1);
     dispatch::RemoveOwner(s);
     ui::RemoveOwner(s);
+    events::RemoveOwner(s);
     lua_close(s->L);
     s->L = nullptr;
     s->dead = true;
