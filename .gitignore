@@ -11,3 +11,9 @@ loader/build/
 third_party/
 tools/.venv/
 tools/libdir.txt
+
+# Built installer packages
+dist/
+installer/.venv/
+installer/backup/
+backup/

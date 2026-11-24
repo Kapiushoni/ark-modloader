@@ -18,4 +18,8 @@ void Scan();
 void SetEnabled(const std::string& file, bool enabled);
 std::vector<ui::ModRow> PanelRows();
 
+// Panel toggles are remembered per mod as "toggle.<label> = 0/1" in ArkMods/<mod>.ini.
+void RestoreToggle(const void* owner, const std::string& label, int* value);
+void SaveToggle(const void* owner, const std::string& label, int value);
+
 }  // namespace mods

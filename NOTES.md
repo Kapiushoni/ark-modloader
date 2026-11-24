@@ -109,3 +109,20 @@
 - Verified in-game: Lua overlay (struct read), UFunction call with FString return, toggle tap writes
   JumpZVelocity (525 -> 1575), shutdown() restores it, live reload, syntax + runtime errors logged
   without crash, 10-row scroll test.
+
+## v0.6.0 (2026-11-24) — remembered toggles + Windows installer
+- Toggles tapped in the MODS panel are saved as `toggle.<label> = 0/1` in the mod's ini (other lines
+  kept) and restored when the toggle is registered — works for C and Lua mods without changes.
+  Verified: SPEED BOOST / SUPER JUMP / SHOW POSITION survived a game restart.
+- Installer (`installer/`, packaged by `tools/make_dist.sh` into `dist/ArkModLoader-<ver>[.zip]`):
+  install.bat / uninstall.bat -> install.ps1. Finds MuMu + adb, starts the emulator, checks root and
+  versionCode 152, optional game install from .xapk (-Xapk or Downloads), backs up libgnustl_shared.so
+  to %LOCALAPPDATA%\ArkModLoader\backup\<ver>, patches it on the PC with Python+LIEF (private venv in
+  %LOCALAPPDATA%\ArkModLoader\python; game files are never shipped), installs loader + mods, launches
+  the game and waits for the loader's log line. Uninstall restores the exact backup, or (no backup)
+  strips the DT_NEEDED with `patch_needed.py --remove`.
+- Verified: clean install, update install, uninstall (sha256 identical to original), no-backup
+  uninstall (game starts fine). NOT tested: -Xapk game install (would delete the user's save).
+- Test finding fixed: the `py` launcher existed without a registered Python — installer now picks the
+  first interpreter that actually runs.
+- No-root / phone installer (APK repack) deliberately not done.

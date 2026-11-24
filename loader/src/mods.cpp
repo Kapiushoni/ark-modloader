@@ -161,6 +161,36 @@ const char* ConfigLookup(Mod* m, const char* key, const std::string& def) {
     return m->cfg.kv.emplace(key, def).first->second.c_str();
 }
 
+// Sets key = value in the mod's ini, keeping every other line (comments included).
+void ConfigWrite(Mod* m, const std::string& key, const std::string& value) {
+    std::vector<std::string> lines;
+    bool replaced = false;
+    if (FILE* f = fopen(m->cfg.path.c_str(), "r")) {
+        char buf[1024];
+        while (fgets(buf, sizeof buf, f)) {
+            std::string l = buf;
+            while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+            std::string t = Trim(l);
+            size_t eq = t.find('=');
+            if (!replaced && !t.empty() && t[0] != '#' && t[0] != ';' && eq != std::string::npos && Trim(t.substr(0, eq)) == key) {
+                l = key + " = " + value;
+                replaced = true;
+            }
+            lines.push_back(l);
+        }
+        fclose(f);
+    } else {
+        lines.push_back("# Settings for " + m->name + " (edit while the game runs)");
+    }
+    if (!replaced) lines.push_back(key + " = " + value);
+    if (FILE* f = fopen(m->cfg.path.c_str(), "w")) {
+        for (const std::string& l : lines) fprintf(f, "%s\n", l.c_str());
+        fclose(f);
+    }
+    m->cfg.kv[key] = value;
+    m->cfg.lastCheck = -1;
+}
+
 __attribute__((noinline)) const char* ApiConfigString(const char* key, const char* def) {
     std::lock_guard<std::recursive_mutex> l(gMu);
     return ConfigLookup(CALLER_MOD(), key, def ? def : "");
@@ -482,6 +512,20 @@ void SetEnabled(const std::string& file, bool enabled) {
     } else if (!Unload(*m)) {
         m->note = "restart the game to apply";
     }
+}
+
+void RestoreToggle(const void* owner, const std::string& label, int* value) {
+    std::lock_guard<std::recursive_mutex> l(gMu);
+    Mod* m = ByBase(owner);
+    if (!m || !value) return;
+    Refresh(m->cfg);
+    auto it = m->cfg.kv.find("toggle." + label);
+    if (it != m->cfg.kv.end()) *value = (it->second == "1" || it->second == "true" || it->second == "on") ? 1 : 0;
+}
+
+void SaveToggle(const void* owner, const std::string& label, int value) {
+    std::lock_guard<std::recursive_mutex> l(gMu);
+    if (Mod* m = ByBase(owner)) ConfigWrite(m, "toggle." + label, value ? "1" : "0");
 }
 
 std::vector<ui::ModRow> PanelRows() {

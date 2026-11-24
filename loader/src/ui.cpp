@@ -45,7 +45,7 @@ Rect gModsBtn;
 Rect gView;            // visible panel area (rows are scrolled inside it)
 float gScroll = 0;     // pixels scrolled from the top of the content
 float gContentH = 0;
-struct HitRow { Rect r; std::string file; int* toggle; bool enable; };
+struct HitRow { Rect r; std::string file; int* toggle; bool enable; std::string label; const void* owner; };
 std::vector<HitRow> gHitRows;  // rebuilt every frame the panel is drawn (screen coordinates)
 
 constexpr int kMaxFinger = 16;
@@ -102,7 +102,7 @@ void Panel() {
             if (!m.note.empty()) DrawText(m.note.c_str(), r.x + 22 * s, r.y + 48 * s, 1.2f * s, 1, 0.8f, 0.3f);
             bool on = m.enabled;
             DrawText(on ? "ON" : "OFF", r.x + w - 110 * s, r.y + 18 * s, 2.2f * s, on ? 0.4f : 1.f, on ? 1.f : 0.4f, 0.4f);
-            gHitRows.push_back({r, m.file, nullptr, !on});
+            gHitRows.push_back({r, m.file, nullptr, !on, "", nullptr});
         } else {
             const Toggle& t = *it.toggle;
             Rect tr{x + 40 * s, sy, w - 40 * s, it.h};
@@ -110,7 +110,7 @@ void Panel() {
             DrawRect(tr.x, tr.y, tr.w, tr.h, v ? 0.05f : 0.1f, v ? 0.45f : 0.1f, v ? 0.15f : 0.12f, 0.88f);
             DrawText(t.label.c_str(), tr.x + 22 * s, tr.y + 16 * s, 1.9f * s, 1, 1, 1);
             DrawText(v ? "ON" : "OFF", tr.x + tr.w - 110 * s, tr.y + 16 * s, 1.9f * s, v ? 0.4f : 1.f, v ? 1.f : 0.4f, 0.4f);
-            gHitRows.push_back({tr, "", t.value, false});
+            gHitRows.push_back({tr, "", t.value, false, t.label, t.owner});
         }
     }
     if (MaxScroll() > 0) {  // scrollbar: drag the list to scroll
@@ -163,7 +163,10 @@ void ApplyEnable(void* p) {
 void ActivateRow(float x, float y) {
     for (const HitRow& r : gHitRows) {
         if (!r.r.Hit(x, y)) continue;
-        if (r.toggle) *r.toggle = !*r.toggle;
+        if (r.toggle) {
+            *r.toggle = !*r.toggle;
+            mods::SaveToggle(r.owner, r.label, *r.toggle);  // remembered across restarts
+        }
         else dispatch::Post(ApplyEnable, new std::pair<std::string, bool>(r.file, r.enable), nullptr);
         return;  // (loading/unloading must not happen in the middle of input handling)
     }
@@ -299,6 +302,7 @@ void AddTouch(ArkTouchFn fn, void* user, const void* owner) {
     gTouches.push_back({fn, user, owner});
 }
 void AddToggle(const char* label, int* value, const void* owner) {
+    mods::RestoreToggle(owner, label ? label : "?", value);  // last state the user chose
     std::lock_guard<std::mutex> l(gMu);
     gToggles.push_back({label ? label : "?", value, owner});
 }
